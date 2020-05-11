@@ -1251,16 +1251,16 @@ if (F) {
 
 # Quick check
 ```{r}
-# if (!exists("scen_RENBAL1")) load("tmp/scen_RENBAL1.RData")
-# if (!exists("scen_RENBAL2")) load("tmp/scen_RENBAL2.RData")
-# if (!exists("scen_RENBAL3")) load("tmp/scen_RENBAL3.RData")
-# if (!exists("scen_RENBAL4")) load("tmp/scen_RENBAL4.RData")
-if (!exists("scen_RENBAL5")) load("tmp/scen_RENBAL5.RData")
+# if (!exists("scen_RENBAL1")) load("scenarios/scen_RENBAL1.RData")
+# if (!exists("scen_RENBAL2")) load("scenarios/scen_RENBAL2.RData")
+if (!exists("scen_RENBAL3")) load("scenarios/scen_RENBAL3.RData")
+# if (!exists("scen_RENBAL4")) load("scenarios/scen_RENBAL4.RData")
+# if (!exists("scen_RENBAL5")) load("scenarios/scen_RENBAL5.RData")
 # scen <- scen_RENBAL1
 # scen <- scen_RENBAL2
-# scen <- scen_RENBAL3
+scen <- scen_RENBAL3
 # scen <- scen_RENBAL4
-scen <- scen_RENBAL5
+# scen <- scen_RENBAL5
 
 summary(scen)  
 # Objective (system costs)
