@@ -1,0 +1,1550 @@
+---
+title: "India Electric Power Sector model"
+author: '@olugovoy'
+date: "10/18/2019"
+output:
+  pdf_document: 
+    toc: yes
+    toc_depth: 5
+  html_document:
+    toc: yes
+    toc_depth: 5
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#knitr::opts_chunk$set(fig_width = 8, fig_height = 6)
+library(energyRt)
+library(lubridate)
+library(tibble)
+library(tidyverse)
+source("solver_options.R")
+# mySolver <- "GLPK" # not capable enough for large models
+# mySolver <- "GAMS" # default LP solver will be used (CPLEX is recommended)
+
+if (!dir.exists("fig")) dir.create("fig")
+if (!dir.exists("scenarios")) dir.create("scenarios")
+if (!dir.exists("tmp")) dir.create("tmp")
+
+tmz <- "Asia/Kolkata" # model timezone
+baseyear <- 2015 # model base year
+myear <- 2050 # model year
+
+```
+
+# GIS info, map
+```{r}
+load("data/IND_adm1.RData")
+load("data/model_regs.RData")
+
+# (reg_names <- unique(as.character(IND@data$region)))
+(reg_names <- unique(as.character(model_regs)))
+(reg_names_in_gis <- as.character(IND@data$region))
+
+(nreg <- length(reg_names))
+(nreg_in_gis <- length(IND@data$region))
+
+gis_ii <- IND$region %in% reg_names
+
+plot(IND[gis_ii,])
+
+# Neighbor regions
+# if (!any((installed.packages())[, "Package"] == "spdep")) install.packages("spdep")
+# nbr <- spdep::poly2nb(IND)
+nbr <- spdep::poly2nb(IND[gis_ii,])
+names(nbr) <- IND@data$region[gis_ii]
+
+# Centers of the regions
+reg_centers <- getCenters(IND[gis_ii,])
+reg_area <- tibble(
+  region = reg_centers$region,
+  area_km2 = raster::area(IND[gis_ii,]) / 1e6
+)
+  
+
+```
+
+
+# Sub-annual time resolution (time-slices)   
+  
+Here we define two levels of time-slices:  
+- the day of the year (*YDAY*), from 1 to 365;  
+- the hour (1 to 24).  
+Therefore we have 8760 time slices, named according to the format *"dNNN_hNN"*, where *N* - numbers.  
+
+For convenience, let's define finctions to convert data-time into slices names and back.  
+
+```{r Time_slices}
+# A list with two levels slices
+timeslices365 <- list(
+  YDAY = paste0("d", formatC(1:365, width = 3, flag = "0")),
+  HOUR = paste0("h", formatC(0:23, width = 2, flag = "0"))
+)
+
+# Function to convert data-time object into names of time-slices.
+datetime2tsdh <- function(dt) {
+  paste0("d", formatC(yday(dt), width = 3, flag = "0"), "_",
+         "h", formatC(hour(dt), width = 2, flag = "0"))
+}
+# check
+datetime2tsdh(today(tmz))
+
+# Function to coerse time-slices names into data-time format, for a given year and time-zone.
+tsdh2datetime <- function(tslice, year = 2050, tz = tmz) {
+  DAY <- as.integer(substr(tslice, 2, 4)) - 1
+  HOUR <- as.integer(substr(tslice, 7, 8))
+  lubridate::ymd_h(paste0(year, "-01-01 0"), tz = tz) + days(DAY) + hours(HOUR)
+}
+# check
+tsdh2datetime("d365_h23")
+
+# data.frame object with names of the final time-slices in the model
+#   and releted data-time information
+slc365 <- tibble(
+  slice = kronecker(timeslices365$YDAY, timeslices365$HOUR, FUN = "paste", sep = "_")
+)
+# add date-time info
+slc365$syday <- substr(slc365$slice, 1, 4)
+slc365$shour <- substr(slc365$slice, 6, 8)
+slc365$yday <- as.integer(substr(slc365$slice, 2, 4))
+slc365$hour <- as.integer(substr(slc365$slice, 7, 8))
+slc365$datetime <- tsdh2datetime(slc365$slice)
+slc365$month <- month(slc365$datetime)
+slc365$week <- week(slc365$datetime)
+head(slc365)
+tail(slc365)
+
+
+```
+
+## Commodities
+
+```{r Commodities}
+ELC <- newCommodity('ELC', slice = "HOUR")
+SOL <- newCommodity('SOL', slice = "HOUR")
+WIN <- newCommodity('WIN', slice = "HOUR")
+WFF <- newCommodity('WFF', slice = "HOUR")
+
+UHV <- newCommodity(
+  name = 'UHV', 
+  description = "Ultra High Voltage electricity",
+  slice = "HOUR")
+
+
+```
+
+## Demand  
+
+Hourly demand by regions - no loadcurve data yet  
+
+```{r ELC_demand}
+(load("data/dmd.RData"))
+dmd <- dmd[dmd$region %in% reg_names,]
+dmd$hour_GWh <- dmd$consum_GWh / 365 / 24 # evenly distributed
+
+dmd_annual <- sum(dmd$consum_GWh)
+
+loadcurve <- tibble(
+  datetime = rep(ymd_h("2050-01-01 0", tz = tmz) + hours(0:(24*365 - 1)), nreg),
+  region = rep(dmd$region, each = 24*365),
+  GWh = rep(dmd$hour_GWh, each = 24*365)
+)
+loadcurve$slice <- datetime2tsdh(loadcurve$datetime)
+head(loadcurve); tail(loadcurve)
+
+# Demand class
+DEM_ELC_DH <- newDemand(
+  name = "DEM_ELC_DH",
+  description = "Demand by regions, hours and year-days, full year",
+  commodity = "ELC",
+  dem = data.frame(
+    year = myear, 
+    region = loadcurve$region,
+    slice = loadcurve$slice, 
+    dem = round(loadcurve$GWh, 7)
+    )
+)
+
+# Check
+dim(DEM_ELC_DH@dem)
+dim(DEM_ELC_DH@dem)[1] / 365 / 24
+sum(DEM_ELC_DH@dem$dem); sum(dmd$consum_GWh)
+summary(DEM_ELC_DH@dem$dem)
+# Annual base-year demand
+elc_dem_BY_GWh <- sum(DEM_ELC_DH@dem$dem)
+
+
+```
+
+## Alternative "flat" demand
+(by now is equal to the *DEM_ELC_DH* since there is no load-curve data)
+```{r}
+# k <- 100
+elc_dem_fx <- loadcurve # 
+elc_dem_fx$year <- 2050L
+
+for (y in unique(elc_dem_fx$year)) {
+  for (r in reg_names) {
+    ii <- elc_dem_fx$year == y & elc_dem_fx$region == r
+    elc_dem_fx$GWh[ii] = mean(elc_dem_fx$GWh[ii]) # make it constant for each region and year
+  }
+}
+elc_dem_fx$PJ <- convert("GWh", "PJ", elc_dem_fx$GWh)
+elc_dem_fx
+
+# Demand object
+DEM_ELC_FX <- newDemand(
+  name = "DEM_ELC_FX",
+  description = "Flat, fixed demand for electricity",
+  commodity = "ELC",
+  dem = list(
+    year = elc_dem_fx$year, 
+    region = elc_dem_fx$region,
+    slice = elc_dem_fx$slice, 
+    dem = elc_dem_fx$GWh
+    )
+)
+dim(DEM_ELC_FX@dem)
+unique(DEM_ELC_FX@dem$year)
+length(unique(DEM_ELC_FX@dem$region))
+length(unique(DEM_ELC_FX@dem$slice))
+
+
+DEM35 <- newCommodity("DEM35", slice = "HOUR")
+
+ELC2DEM35 <- newTechnology(
+  name = "ELC2DEM35",
+  description = "Tech for allocatable variable demand 1x",
+  # region = reg_names,
+  input = list(
+    comm = "ELC",
+    unit = "GWh"
+    # unit = "PJ"
+  ),
+  output = list(
+    comm = "DEM35",
+    unit = "GWh"
+    # unit = "PJ"
+  ),
+  # cap2act = 31.536, #convert("GWh", "PJ", 24 * 365),
+  cap2act = 24*365,
+  afs = list(
+    slice = "ANNUAL",
+# The technology cannot produce less than 35% of annual capacity for each region
+    afs.lo = .35
+  )
+)
+draw(ELC2DEM35)
+
+CELC2DEM35CAPFX <- newConstraintS(
+  name = "CELC2DEM35CAPFX", 
+  eq = "==",
+  type = "capacity",
+  for.each = list(
+    year = 2050,
+    tech = "ELC2DEM35"),
+  for.sum = list(
+    region = reg_names
+  ),
+  rhs = elc_dem_BY_GWh/365/24/ELC2DEM35@afs$afs.lo) # limit on capacity
+
+```
+
+# Optimized location of consumption
+```{r}
+DEM100 <- newCommodity("DEM100", slice = "HOUR")
+
+ELC2DEM100 <- newTechnology(
+  name = "ELC2DEM100",
+  description = "Tech for allocatable static demand 1x",
+  input = list(
+    comm = "ELC",
+    unit = "GWh"
+    # unit = "PJ"
+  ),
+  output = list(
+    comm = "DEM100",
+    unit = "GWh"
+    # unit = "PJ"
+  ),
+  # cap2act = 31.536, #convert("GWh", "PJ", 24 * 365),
+  cap2act = 24*365,
+  # afs = list(
+  #   slice = "ANNUAL",
+  #   afs.lo = 1
+  # ),
+  af = list(
+    af.lo = 1
+  ),
+  # region = c("XJ", "XZ", "NM", "QH", "SC", "GS", "YN"), # Exporting regions only
+  # invcost = list(
+  #   invcost = 1e-3 # arbitrary small number for tracking
+  # ), 
+  olife = list(olife = 100)
+)
+draw(ELC2DEM100)
+
+CELC2DEM100CAPFX <- newConstraintS(
+  name = "CELC2DEM100CAPFX", 
+  eq = "==",
+  type = "capacity",
+  for.each = list(
+    year = 2050,
+    tech = "ELC2DEM100"),
+  for.sum = list(
+    region = reg_names
+  ),
+  rhs = elc_dem_BY_GWh/365/24) # limit on capacity
+
+CELC2DEM100CAPUP <- newConstraintS(
+  name = "CELC2DEM100CAPUP", 
+  eq = "<=",
+  type = "capacity",
+  for.each = list(
+    year = 2050,
+    region = reg_names,
+    tech = "ELC2DEM100"),
+  rhs = CELC2DEM100CAPFX@defVal/5) # at least 5 regions
+
+
+```
+
+
+# Renewables potential (weather factors)  
+Assumptions:  
+1sq.m PV requires ~2.5sq.m of land  
+1.046 * 1.558 PV panel 345 Watt / 1.63 m2 ~= 200 Watt/m2 == .2 GW/km^2 /2.5 = .08 GW/km^2 = 80GW/1000km^2  
+
+Wind onshore: Assuming 4 megawatts per square kilometer (about 10 megawatts per square mile, NREL)
+Wind offshore: 3-5 megawatts (MW) per square kilometer
+For simplicity, up to 3 GW per 1000 sq.km
+
+```{r Weather}
+# Solar AF
+# dim(dhsol)
+# head(dhsol)
+(load("data/dhsol.RData"))
+
+# ii <- rep(T, dim(dhsol)[1]) # filter if needed
+ii <- dhsol$region %in% reg_names
+summary(ii)
+
+SOLAR_AF <- newWeather("SOLAR_AF",
+                        description = "Ground level insolation AF",
+                        # unit = "kWh/kWh_max",
+                        slice = "HOUR",
+                        weather = data.frame(
+                          region = as.character(dhsol$region[ii]),
+                          # year = 2017,
+                          slice = dhsol$slice[ii],
+                          wval = dhsol$WF[ii]
+                        ))
+
+head(SOLAR_AF@weather)
+dim(SOLAR_AF@weather)[1] / nreg / 365 / 24 # Check: must be == 1
+
+# Max capacity by MERRA-2 locations
+# PV_GW_max_reg <- ysol %>%
+#   group_by(region) %>%
+#   summarise(GW_up = PV_GW_max * n())
+
+reg_area$sol_max_GW <- 80 * reg_area$area_km2 / 1e3 # 80 GW / 1000 km if 100$ coverage
+0.01 * sum(reg_area$sol_max_GW) # up to 1% of territory
+
+
+# Wind AF (onshore)
+load("data/wnd_af10.RData")
+ii <- wnd_af10$region %in% reg_names
+wnd_af10 <- wnd_af10[ii,]
+wnd_af10$slice <- datetime2tsdh(wnd_af10$datetime)
+wnd_af10
+dim(wnd_af10)[1] / 365/24 # number of regions with the onshore potential
+ii <- rep(T, dim(wnd_af10)[1]) # 
+summary(wnd_af10$af50m)
+# wnd_af20$region <- as.character(wnd_af20$region)
+WINON10_AF <- newWeather("WINON10_AF",
+                        description = "Onshore wind potential af20",
+                        region = unique(wnd_af10$region[ii]),
+                        # unit = "kWh/kWh_max",
+                        slice = "HOUR",
+                        weather = data.frame(
+                          region = as.character(wnd_af10$region[ii]),
+                          # year = 2010,
+                          slice = wnd_af10$slice[ii],
+                          wval = wnd_af10$af50m[ii]
+                        ))
+head(WINON10_AF@weather)
+dim(WINON10_AF@weather)[1] / 365 / 24 # Check - number of regions with the data
+
+reg_area$win_max_GW <- 3 * reg_area$area_km2 / 1e3 # 80 GW / 1000 km if 100$ coverage
+0.1 * sum(reg_area$win_max_GW) # up to 1% of territory
+
+# Wind AF (offshore)
+ii <- wndf_af10$region %in% reg_names
+wndf_af10 <- wndf_af10[ii,]
+wndf_af10$slice <- datetime2tsdh(wndf_af10$datetime)
+wndf_af10
+dim(wndf_af10)[1] / 365/24
+ii <- rep(T, dim(wndf_af10)[1]) # 
+summary(wndf_af10$af50m)
+wndf_af10$region <- as.character(wndf_af10$region)
+WINOF10_AF <- newWeather("WINOF10_AF",
+                        description = "Offshore wind potential af20",
+                        # unit = "kWh/kWh_max",
+                        region = unique(wndf_af10$region),
+                        slice = "HOUR",
+                        weather = data.frame(
+                          region = as.character(wndf_af10$region[ii]),
+                          # year = 2010,
+                          slice = wndf_af10$slice[ii],
+                          wval = wndf_af10$af50m[ii]
+                        ))
+head(WINOF10_AF@weather)
+dim(WINOF10_AF@weather)[1] / 365 / 24
+
+```
+
+# Supply
+Declaration of resources (upstream technologies) in the model.  
+Here we use only solar and wind energy.  
+
+```{r Solar_energy_potential}
+
+RES_SOL <- newSupply(
+  name = "RES_SOL",
+  description = "Terrestrial solar radiation - maximum potential",
+  commodity = "SOL",
+  unit = "GWh",
+# Weather factors could be used to regulate hourly supply of the resources.
+# Though to reduce the model dimension, it is enough to use
+# weather factors in technologies.
+  # weather = data.frame(
+  #   weather = c("SOLAR_AF"),
+  #   wava.up =  c(1)
+  #   ),
+  # availability = list(
+  #   # region = dh$region,
+  #   # slice = dh$slice365,
+  #   ava.up = 1e10 # Max available resource in hour, i.e. no limit by now
+  # ),
+  # slice = "HOUR"
+  slice = "ANNUAL" # to reduce the model dimension
+)
+
+RES_WIN <- newSupply(
+  name = "RES_WIN",
+  description = "Onshore wind - maximum potential",
+  commodity = "WIN",
+  region = unique(wnd_af10$region),
+  unit = "GWh",
+  # weather = data.frame(
+  #   weather = c("SOLAR_AF"),
+  #   wava.up =  c(1)
+  #   ),
+  availability = list(
+    region = wnd_af10$region,
+    slice = wnd_af10$slice,
+# here is an alternative (equivalent) way to use weather factors in supply
+    ava.up = wnd_af10$max_GWh # Max available resource in hour
+  ),
+  slice = "HOUR"
+)
+
+RES_WFF <- newSupply(
+  name = "RES_WFF",
+  description = "Offshore wind - maximum potential",
+  commodity = "WFF",
+  region = unique(wndf_af10$region),
+  unit = "GWh",
+  # weather = data.frame(
+  #   weather = c("SOLAR_AF"),
+  #   wava.up =  c(1)
+  #   ),
+  availability = list(
+    region = wndf_af10$region,
+    slice = wndf_af10$slice,
+    ava.up = wndf_af10$max_GWh # Max available resource in hour
+  ),
+  slice = "HOUR"
+)
+
+```
+
+# Power generating technologies
+
+```{r Technologies}
+
+ESOL <- newTechnology(
+  name = "ESOL",
+  description = "Utility Scale Solar PV",
+  # region = "AZ",
+  input = list(
+    comm = "SOL",
+    unit = "GWh"
+  ),
+  output = list(
+    comm = "ELC",
+    unit = "GWh"
+  ),
+  cap2act = 365*24,
+  af = list(
+    af.fx = 1 # forcing output when resource is available
+  ),
+  weather = list(
+    weather = c("SOLAR_AF"),
+    waf.fx = 1 # weather factor (multiplier) will be applied to af.fx
+  ),
+  # fixom = list(
+  #   fixom = 10 # assumed, 1% of investment costs a year
+  # ),
+  invcost = list(
+    # Assuming 1$/Watt 
+    # https://www.nrel.gov/news/press/2017/nrel-report-utility-scale-solar-pv-system-cost-fell-last-year.html
+    invcost = 1000 # convert("USD/W", "MUSD/GW", 1)
+  ),
+  # start = list(
+  #   start = 2017
+  # ),
+  olife = list(
+    olife = 25
+  )
+)
+draw(ESOL)
+
+CSOL_UP <- newConstraintS(
+  name = "CSOL_UP",
+  eq = "<=",
+  type = "capacity",
+  for.each = data.frame(
+    year = 2050L,
+    tech = "ESOL",
+    region = reg_area$region),
+  rhs = data.frame(
+    year = 2050L,
+    tech = "ESOL",
+    region = reg_area$region,
+    rhs = 0.02 * round(reg_area$sol_max_GW, 0) # up to 2% of therritory per region
+  )
+)
+
+
+EWIN <- newTechnology(
+  name = "EWIN",
+  description = "Onshore wind farm",
+   WINON10_AF@region, # Limiting to regions with available resource
+  input = list(
+    comm = "WIN",
+    unit = "GWh"
+  ),
+  output = list(
+    comm = "ELC",
+    unit = "GWh"
+  ),
+  cap2act = 365*24,
+  af = list(
+    af.fx = 1 # forcing output when resource is available
+  ),
+  weather = list(
+    weather = c("WINON10_AF"),
+    waf.fx = c(1)
+    # waf.up = c(1) # 
+  ),
+  # fixom = list(
+  #   fixom = 15 # Assumed, 1% a year
+  # ),
+  invcost = list(
+    # Assuming 1.5$/Watt 
+    # https://www.irena.org/-/media/Files/IRENA/Agency/Publication/2018/Jan/IRENA_2017_Power_Costs_2018.pdf
+    invcost = 1500 # 
+  ),
+  # start = list(
+  #   start = 2017
+  # ),
+  olife = list(
+    olife = 25
+  )
+)
+draw(EWIN)
+
+EWFF <- newTechnology(
+  name = "EWFF",
+  description = "Offshore wind farm",
+  region = WINOF10_AF@region, # Limiting to regions with available resource
+  input = list(
+    comm = "WFF",
+    unit = "GWh"
+  ),
+  output = list(
+    comm = "ELC",
+    unit = "GWh"
+  ),
+  cap2act = 365*24,
+  af = list(
+    af.fx = 1 # forcing output when resource is available
+  ),
+  weather = list(
+    weather = c("WINOF10_AF"),
+    waf.up = c(1) # 
+  ),
+  # fixom = list(
+  #   fixom = 45 # Assumed, 1% a year
+  # ),
+  invcost = list(
+    # Assuming 3-4.5$/Watt 
+    # https://www.irena.org/-/media/Files/IRENA/Agency/Publication/2018/Jan/IRENA_2017_Power_Costs_2018.pdf
+    # https://www.energy.gov/sites/prod/files/2019/08/f65/2018%20Offshore%20Wind%20Market%20Report.pdf
+    invcost = 3500 # convert("USD/W", "MUSD/GW", 1)
+  ),
+  # start = list(
+  #   start = 2017
+  # ),
+  olife = list(
+    olife = 25
+  )
+)
+draw(EWFF)
+
+```
+
+
+# Storage technologies
+
+```{r Storage}
+# STGBTR Hourly - within 24h ####
+STGBTR <- newStorage(
+  name = 'STGBTR',
+  commodity = 'ELC',
+  description = "Generic grid-integrated intraday storage (battery)",
+  cap2stg = 1, # 
+  olife = list(olife = 20), 
+  invcost = list(
+    # See IRENA 2030 (from 77 to 574, p.77)
+    invcost = convert("USD/kWh", "MUSD/GWh", 200)
+    ), 
+  seff = data.frame(
+    inpeff = 0.8, # assumed efficiency of charging 
+    stgeff = 0.9 # assumed efficiency of storing energy (annual)
+    # outeff = 1 # discharge efficiency
+    )
+)
+
+STGBTR1 <- newStorage(
+  name = 'STGBTR',
+  commodity = 'ELC',
+  description = "Generic grid-integrated intraday storage (battery)",
+  cap2stg = 1, # 
+  olife = list(olife = 20), 
+  invcost = list(
+    # See IRENA 2030 (from 77 to 574, p.77)
+    invcost = convert("USD/kWh", "MUSD/GWh", 200)
+    ), 
+  seff = data.frame(
+    inpeff = 0.8, # assumed efficiency of charging 
+    stgeff = 0.9, # assumed efficiency of storing energy (annual)
+    cinp.up = 24*365 * 2, # 1/2-hour charging
+    cout.up = 24*365 / 2 # 2-hour storage (discharging, i.e. GW capacity)
+    # outeff = 1 # discharge efficiency
+    )
+)
+
+# STGP2P Daily - within 365 days ####
+# STGP2P1 <- newStorage(
+#   name = 'STGP2P',
+#   commodity = 'ELC',
+#   description = "Power-to-power type of technology",
+#   cap2stg = 1, # if in PJ, convert("GWh", "PJ"),
+#   olife = list(
+#     olife = 25), 
+#   invcost = 50, # USD/kWh, assumption
+#   seff = data.frame(
+#     inpeff = 0.8, # power to H2 efficiency
+#     cinp.up = 24*365 / 100, # speed of P2X conversion for 1GW of storage
+#     cout.up = 24*365 / 100,  # speed of X2P conversion for 1GW of storage
+#     outeff = 0.6 # H2 to power efficiency
+#     # stgeff = .9 
+#     ),  
+#   varom = list(
+#     # Assuming high operational costs, adding ~ 5 cents/kWh
+#     inpcost = convert("USD/kWh", "MUSD/GWh", .05)
+#     )
+# )
+
+```
+
+
+# Interregional UHV electrical grid
+```{r Trade_bidirect_UHV_INV, eval=TRUE}
+# Propose trade matrix between regions
+{
+if (F) { 
+  # Load trade matrix from your file
+  trd_xl <- readxl::read_excel("data/trade_matrix01.xlsx",
+                               range = "A1:AX50")
+
+  trd_nbr <- as.matrix(trd_xl[,-1])
+  trd_nbr[lower.tri(trd_nbr)] <- NA
+  rownames(trd_nbr) <- trd_xl$region
+} else { 
+  # Or create trade matrix for all neighbour regions
+  # trd_nbr <- matrix(rep(NA, nreg_in_gis*nreg_in_gis),
+  #                   nrow = nreg_in_gis,
+  #                   dimnames = list(reg_names_in_gis, reg_names_in_gis))
+  trd_nbr <- matrix(rep(NA, nreg*nreg),
+                    nrow = nreg,
+                    dimnames = list(reg_names, reg_names))
+  head(trd_nbr)
+  dim(trd_nbr)
+  
+  for (i in 1:length(reg_names)) {
+    trd_nbr[i, nbr[[i]]] <- 1
+    trd_nbr[nbr[[i]], i] <- 1
+  }
+  dim(trd_nbr)
+  summary(!is.na(c(trd_nbr)))
+  # ii <- reg_names_in_gis %in% reg_names
+  ii <- reg_names %in% reg_names
+  trd_nbr <- trd_nbr[ii, ii]
+  dim(trd_nbr)
+  # For bidirectional trade, keep only one direction
+  trd_nbr[lower.tri(trd_nbr)] <- NA
+  summary(!is.na(c(trd_nbr)))
+}
+head(trd_nbr)
+# write.csv(trd_nbr, file = "data/trade_matrix.csv")
+trd_nbr[trd_nbr == 0] <- NA
+
+# Convert the matrix to data.frame (table) format
+trd_dt <- as.data.frame.table(trd_nbr, stringsAsFactors = F)
+trd_dt <- trd_dt[!is.na(trd_dt$Freq),]
+head(trd_dt)
+dim(trd_dt)
+trd_dt <- dplyr::distinct(trd_dt)
+dim(trd_dt)
+names(trd_dt) <- c("src", "dst", "trade")
+trd_dt$trade <- with(trd_dt, paste0("TRBD_UHV_", src, "_", dst))
+head(trd_dt)
+
+# Map region flows
+trd_map <- left_join(trd_dt, reg_centers[,1:3], by = c("src" = "region"))
+trd_map <- left_join(trd_map, reg_centers[,1:3], by = c("dst" = "region"))
+trd_map <- trd_map %>% 
+  rename(xsrc = x.x, ysrc = y.x,
+         xdst = x.y, ydst = y.y)
+trd_map <- as_tibble(trd_map)
+
+# a <- value
+trd_flows_map <-
+ggplot(data = ind) + 
+    geom_polygon(aes(x = long, y = lat, group = group), fill = "wheat", 
+                 colour = "white", alpha = 1, size = .5) + # aes fill = id, 
+    coord_fixed(1) +
+    guides(fill=FALSE) +  # do this to leave off the color legend
+    theme_void() + labs(title = "Available for investment interregional long distance power lines")  + 
+    theme(plot.title = element_text(hjust = 0.5), 
+          plot.subtitle = element_text(hjust = 0.5)) +
+    geom_segment(aes(x=xsrc, y=ysrc, xend=xdst, yend=ydst), 
+                 data = trd_map, inherit.aes = FALSE, size = 4, 
+                 alpha = 1, colour = "grey", lineend = "round", show.legend = T) +
+    geom_point(data = reg_centers, aes(x, y), colour = "red") +
+    geom_segment(aes(x=xsrc, y=ysrc, xend=xdst, yend=ydst), 
+                 data = trd_map, inherit.aes = FALSE, size = .1, 
+             # arrow = arrow(type = "closed", angle = 15, 
+             #               length = unit(0.15, "inches")),
+             colour = "darkgrey", alpha = 1, 
+             lineend = "butt", linejoin = "mitre", show.legend = T) # , name = "Trade, PJ"
+trd_flows_map
+# ggsave("fig/trd_flows_map.pdf", trd_flows_map, device = "pdf")
+}
+# Calculate distance between regions centers:
+# labpt <- get_labpt_spdf(IND)
+labpt <- reg_centers
+# rownames(labpt) <- labpt[,"region"]
+
+# Estimate grid length, losses, costs
+trd_dt$distance_km <- 0.
+for (i in 1:dim(trd_dt)[1]) {
+  rg_dst <- trd_dt$dst[i]
+  rg_src <- trd_dt$src[i]
+  ii <- labpt$region == rg_dst
+  lab_dst <- c(labpt$x[ii], labpt$y[ii])
+  ii <- labpt$region == rg_src
+  lab_src <- c(labpt$x[ii], labpt$y[ii])
+  trd_dt$distance_km[i] <- raster::pointDistance(
+    lab_src, lab_dst, T)/1e3
+}
+
+# Assume 15% longer distance due to a landscape
+trd_dt$distance_km <- 1.15 * trd_dt$distance_km
+# Assume losses 2% per 1000 km
+# trd_dt$losses <- round(trd_dt$distance_km / 1e3 * 0.02, 4)
+# Assume losses 1% per 1000 km (UHVDC)
+trd_dt$losses <- round(trd_dt$distance_km / 1e3 * 0.01, 4)
+trd_dt$teff <- 1 - trd_dt$losses
+# Assumption based on ABB's 4000-8000 MUSD per 12GW UHVDC, 2000km, 1-5% system losses
+# i.e. ~$160-333 MUSD/1000km per 1GW of the total system 
+# assuming ~$200 MUSD/1000km per 1GW of power line,
+# and $50 MUSD/GW for converter stations on each end
+trd_dt$invcost <- round(trd_dt$distance_km / 1e3 * 200) # MUSD/GW of 1000km UHVDC
+trd_dt <- as_tibble(trd_dt)
+
+# Define trade object for every route, 
+# store in a repository object
+TRBD_UHV_NEI <- newRepository(name = "TRBD_UHV_NEI")
+for (i in 1:dim(trd_dt)[1]) {
+  src <- trd_dt$src[i]
+  dst <- trd_dt$dst[i]
+  trd_nm <- paste0("TRBD_UHV_", src, "_", dst)  # Trade object name
+  cmd_nm <- "UHV"
+  # Trade class for every route
+  trd <- newTrade(trd_nm,
+                  commodity = cmd_nm,
+                  # source = c(src, dst),
+                  # destination = c(src, dst),
+                  routes = list(
+                    src = c(src, dst),
+                    dst = c(dst, src)
+                  ),
+                  trade = data.frame(
+                    src = c(src, dst),
+                    dst = c(dst, src),
+                    # Maximum capacity per route in GW
+                    # ava.up = convert("GWh", "GWh", 60), (!!! bug)
+                    teff = trd_dt$teff[i] # trade losses
+                    # cost = trd_dt$cost[i]  # trade costs
+                    # markup = trd_dt$cost[i] # and/or markup
+                    ),
+                  #!!! New stuff - testing
+                  capacityVariable = TRUE, # The trade route has capacity (not just flow) and can be endogenous
+                  # bidirectional = TRUE, #
+                  invcost = data.frame(
+                    # src = src,
+                    # dst = dst,
+                    # year = 2010,
+                    region = c(dst, src),
+                    invcost = trd_dt$distance_km[i] / 1e3 * 250 / 2 # 
+                  ),
+                  # olife = data.frame(
+                  olife = 80,
+                  # ),
+                  cap2act = convert("GWh", "GWh", 24*365)
+                  )
+  
+  TRBD_UHV_NEI <- add(TRBD_UHV_NEI, trd)
+}
+names(TRBD_UHV_NEI@data)
+TRBD_UHV_NEI@data[[1]]
+
+```
+
+
+# Fixing grid capacity
+Endogenous grid is computantionally intensive, fixing it will speed-up the solution for quick scenarios.
+```{r}
+TRBD_UHV_NEI_FX <- TRBD_UHV_NEI # Grid with flow limits, not capacity variable
+TRBD_UHV_NEI_FX_CAP <- TRBD_UHV_NEI # Grid with fixed capacity
+
+trd <- newTrade("",
+                stock = list(year = 2050, stock = 100), # GW - almost unlimiting
+                end = 2010
+                )
+
+trd_empty <- newTrade("")
+
+for (i in 1:length(TRBD_UHV_NEI_FX@data)) {
+  TRBD_UHV_NEI_FX_CAP@data[[i]]@stock <- trd@stock
+  TRBD_UHV_NEI_FX_CAP@data[[i]]@end <- trd@end
+  
+  TRBD_UHV_NEI_FX@data[[i]]@trade$ava.up <- 100
+  TRBD_UHV_NEI_FX@data[[i]]@capacityVariable <- F
+  TRBD_UHV_NEI_FX@data[[i]]@invcost <- trd_empty@invcost
+  TRBD_UHV_NEI_FX@data[[i]]@olife <- trd_empty@olife
+}
+# TRBD_UHV_NEI_FX@data$TRBD_UHV_AR_AS
+# TRBD_UHV_NEI_FX_CAP@data$TRBD_UHV_AR_AS
+
+# Dropping UHV and converter stations, i.e. trade with ELC
+TRBD_ELC_NEI_FX_CAP <- TRBD_UHV_NEI_FX_CAP # Grid with fixed capacity
+for (i in 1:length(TRBD_ELC_NEI_FX_CAP@data)) {
+  TRBD_ELC_NEI_FX_CAP@data[[i]]@name <- sub("_UHV_", "_ELC_", TRBD_ELC_NEI_FX_CAP@data[[i]]@name)
+  TRBD_ELC_NEI_FX_CAP@data[[i]]@commodity <- "ELC"
+}
+rm(trd, trd_empty)
+
+```
+
+# Inverter and rectifier stations
+```{r UHV_rectifiers_inverters}
+# Parameters assumed or calibrated based on 
+# ABB's 4000-8000 MUSD per 12GW, 2000km, 1-5%
+# and other sources
+
+ELC2UHV <- newTechnology(
+  name = "ELC2UHV",
+  description = "Converter stations - ELC to UHV",
+  input = list(
+    comm = "ELC",
+    unit = "GWh"
+    # unit = "PJ"
+  ),
+  output = list(
+    comm = "UHV",
+    unit = "GWh"
+    # unit = "PJ"
+  ),
+  # cap2act = 31.536,
+  cap2act = 24*365,
+  ceff = list(
+    comm = "ELC",
+    cinp2use = .99 # see also Siemens -- 3% total losses for HVDC/1000km
+  ),
+  slice = "HOUR",
+  invcost = list(
+    invcost = 50  # 
+  ),
+  olife = 20 # assumed
+)  
+draw(ELC2UHV)
+
+
+UHV2ELC <- newTechnology(
+  name = "UHV2ELC",
+  description = "Converter stations - UHV to ELC",
+  input = list(
+    comm = "UHV",
+    unit = "GWh"
+    # unit = "PJ"
+  ),
+  output = list(
+    comm = "ELC",
+    unit = "GWh"
+    # unit = "PJ"
+  ),
+  # cap2act = 31.536,
+  cap2act = 24*365,
+  ceff = list(
+    comm = "UHV",
+    cinp2use = .99
+  ),
+  slice = "HOUR",
+  invcost = list(
+    invcost = 50 # Assumed, based on ABB data
+  ),
+  olife = 20 # assumed
+)  
+draw(UHV2ELC)
+
+```
+
+# Curtailments
+Modeled as a trade with the rest of the world (ROW), export and import with fixed price.  
+```{r ROW_trade}
+
+# Adding the export is optional, `vBalance` captures unused electricity
+EEXP <- newExport(
+  name = "EEXP",
+  description = "Supply curtalments (artificial export to capture excessive ELC production by renewables)",
+  commodity = "ELC",
+  exp = list(
+    price = convert("USD/kWh", "MUSD/GWh", .01/1000) # 1/1000 cents per kWh
+  )
+)
+
+EIMP1 <- newImport(
+  name = "EIMP",
+  description = "Demand curtailments, electricity import at high price (to identify needs for back-up techs such as biomass)",
+  commodity = "ELC",
+  imp = list(
+    price = convert("USD/kWh", "MUSD/GWh", 1) # USD per kWh, marginal price
+  )
+)
+
+EIMP5 <- EIMP1
+EIMP5@imp$price <- 5
+
+EIMP10 <- EIMP1
+EIMP10@imp$price <- 10
+
+```
+
+
+# The Model  
+The base model and scenario:  
+- generic electricity (ELC);  
+- three types of renewables; 
+- two types of energy storage;  
+- no inter-regional trade/dispatch.  
+
+```{r Model_RENBAL, eval=TRUE}
+# Repository with all the data-objects
+reps <- add(newRepository('main_repository'), 
+  # Commodities
+  ELC, SOL, WIN, WFF, #UHV,
+  # Resources (supply)
+  RES_SOL, RES_WIN, RES_WFF,
+  # Weather factors
+  SOLAR_AF, WINOF10_AF, WINON10_AF,
+  # Generating technologies
+  ESOL, EWIN, EWFF,
+  CSOL_UP,
+  # Storage
+  STGBTR, 
+  #STGP2P1,
+  # Simplified interregional ELC trade
+  # TRD_ELC_ALL,
+  # UHV grid
+  # TRBD_UHV_NEI,
+  # ELC2UHV, UHV2ELC,
+  # Export/Import,
+  # EEXP, 
+  EIMP1 # low relaiability (low marginal cost, high demand curtailments)
+  # ELC demand with load curve (24 hours x 365 days)
+  # DEM_ELC_DH # static
+)
+length(reps@data)
+names(reps@data)
+
+# model-class object 
+mdl <- newModel(
+  name = 'RENBAL', 
+  description = "Renewables balancing model",
+  ## in case of infeasibility, `dummy` variables can be added
+  # debug = data.frame(#comm = "ELC",
+  #                    dummyImport = 1e6,
+  #                    dummyExport = 1e6),
+  region = reg_names,
+  discount = 0.05,
+  slice = list(ANNUAL = "ANNUAL",
+               # MONTH = timeslices$MONTH, 
+               # HOUR = timeslices$HOUR
+               YDAY = timeslices365$YDAY, 
+               HOUR = timeslices365$HOUR
+               ),
+  repository = reps,
+  # GIS = IND,
+  early.retirement = F)
+
+# Check the model time-slices
+head(mdl@sysInfo@slice@levels)
+
+# Set milestone-years
+# mdl <- setMilestoneYears(mdl, start = 2015, interval = c(1, 2, 5, 6, 7, rep(10, 3)))
+mdl <- setMilestoneYears(mdl, start = 2050, interval = c(1))
+mdl@sysInfo@milestone # check
+
+# (optional) the model info
+{mdl@description <- "
+India power sector, renewables balancing version,
+30 regions, 1 hour resolution,
+3 types of renewables, 
+1 types of storages,
+no initial stock."}
+
+# mdl2 <- mdl
+# mdl2@data$main_repository@data$EIMP <- EIMPLO
+
+```
+
+# Scenario 1: No interregional trade  
+
+```{r scen_RENBAL1, eval=FALSE}
+# Workflow to solve the model (recommended for large models):
+# 1. Interpolation of parameters
+scen_RENBAL1 <- interpolate(add(mdl, DEM_ELC_DH), name = "RENBAL1", 
+  description = "No inter-regional dispatch.")
+size(scen_RENBAL1)
+
+# 2. Writing the model code and data in folder
+write_model(scen_RENBAL1, tmp.dir = "solwork/scen_RENBAL1", solver = GAMS)
+save(scen_RENBAL1, file = "tmp/scen_RENBAL1.RData")
+
+# 3. Solving the model
+solve_model(tmp.dir = "solwork/scen_RENBAL1", wait = F)
+# Alterntively, run GAMS directly in the model folder: 'gams energyRt'
+
+# 4. Read the solution (# after GAMS has finished)
+if (F) { 
+  if (!exists("scen_RENBAL1")) load("tmp/scen_RENBAL1.RData")
+  summary(scen_RENBAL1)
+  scen_RENBAL1 <- read_solution(scen_RENBAL1, dir.result = "solwork/scen_RENBAL1")
+  summary(scen_RENBAL1)
+  
+  save(scen_RENBAL1, file = "scenarios/scen_RENBAL1.RData")
+  # load("scenarios/scen_RENBAL1.RData")
+}
+
+```
+
+# Scenario 2: Exogenous grid 100GW between neighbours
+```{r scen_RENBAL2, eval=FALSE}
+# (optional) Scenario info:
+{scen_descr <- "
+India power sector, renewables balancing version,
+30 regions, 1 hour resolution,
+exogenous hourly demand,
+3 types of renewables, 
+1 types of storage,
+no initial stock,
+exogenous 100GW UHV grid between all regions,
+converter stations."}
+
+# 1. Interpolation of parameters
+scen_RENBAL2 <- interpolate(
+  add(mdl, UHV, TRBD_UHV_NEI_FX_CAP, ELC2UHV, UHV2ELC, DEM_ELC_DH), 
+  name = "RENBAL2", description = scen_descr)
+
+# 2. Writing the model code and data in folder
+write_model(scen_RENBAL2, tmp.dir = "solwork/scen_RENBAL2", solver = GAMS)
+save(scen_RENBAL2, file = "tmp/scen_RENBAL2.RData")
+
+# 3. Solving the model
+solve_model(tmp.dir = "solwork/scen_RENBAL2", wait = F)
+# Alterntively, run GAMS directly in the model folder: 'gams mdl'
+
+# 4. Read the solution
+if (F) {
+  if (!exists("scen_RENBAL2")) load("tmp/scen_RENBAL2.RData")
+  summary(scen_RENBAL2)
+  scen_RENBAL2 <- read_solution(scen_RENBAL2, dir.result = "solwork/scen_RENBAL2")
+  summary(scen_RENBAL2)
+  save(scen_RENBAL2, file = "scenarios/scen_RENBAL2.RData")
+# load("scenarios/scen_RENBAL2.RData")
+}
+
+```
+
+# Scenario 3: Endogenous grid
+```{r scen_RENBAL3, eval=FALSE}
+# (optional) Scenario info:
+{scen_descr <- "
+India power sector, balancing version,
+30 regions, 1 hour resolution,
+exogenous hourly demand,
+3 types of renewables, 
+1 types of storage,
+no initial stock,
+low ELC import price.
+endogenous, unlimited UHV grid,
+converter stations."}
+
+# 1. Interpolation of parameters
+scen_RENBAL3 <- interpolate(
+  add(mdl, UHV, TRBD_UHV_NEI, ELC2UHV, UHV2ELC, DEM_ELC_DH), 
+  name = "RENBAL3", description = scen_descr)
+save(scen_RENBAL3, "tmp/scen_RENBAL3.RData")
+
+# 2. Writing the model code and data in folder
+write_model(scen_RENBAL3, tmp.dir = "solwork/scen_RENBAL3", solver = GAMS)
+
+# 3. Solving the model
+solve_model(tmp.dir = "solwork/scen_RENBAL3", wait = F)
+
+# 4. Read the solution
+if (F) {
+  if (!exists("scen_RENBAL3")) load("tmp/scen_RENBAL3.RData")
+  scen_RENBAL3 <- read_solution(scen_RENBAL3, dir.result = "solwork/scen_RENBAL3")
+  summary(scen_RENBAL3)
+  save(scen_RENBAL3, file = "scenarios/scen_RENBAL3.RData")
+  # load("scenarios/scen_RENBAL3.RData")
+}
+
+```
+
+# Scenario 4: Constraints on investments in UHV grid
+```{r scen_RENBAL4, eval=FALSE}
+# Unrestricted (optimal) grid capacity from "RENBAL3"
+msy <- mdl@sysInfo@milestone$mid
+
+(vTradeCap <- getData(scen_RENBAL3, name = "vTradeCap", merge = T, year = max(msy),
+                      newNames = c(value = "GW")))
+
+trd_TWkm <- full_join(trd_dt, select(vTradeCap, trade, GW)) %>%
+  mutate(TWkm = distance_km / 1e3 * GW)
+sum(trd_TWkm$TWkm, na.rm = T) # TW*km
+
+# Unrestricted (cost-optimal) grid investment
+(vTradeInv <- getData(scen_RENBAL3, name = "vTradeInv", merge = T))
+sum(vTradeInv$value) # 
+sum(vTradeInv$value)/sum(trd_TWkm$TWkm, na.rm = T)
+
+GRIDINV50 <- newConstraint(
+  'GRIDINV50', eq = '<=', rhs = sum(vTradeInv$value)/2,
+  variable = list(variable = 'vTradeInv'))
+
+GRIDINV25 <- newConstraint(
+  'GRIDINV25', eq = '<=', rhs = sum(vTradeInv$value)/4,
+  variable = list(variable = 'vTradeInv'))
+
+# 1. Interpolation of parameters
+scen_RENBAL4 <- interpolate(
+  add(mdl, UHV, TRBD_UHV_NEI, ELC2UHV, UHV2ELC, GRIDINV25, DEM_ELC_DH), 
+  name = "RENBAL4")
+save(scen_RENBAL4, file = "tmp/scen_RENBAL4_interpolated.RData")
+
+# 2. Writing the model code and data in folder
+write_model(scen_RENBAL4, tmp.dir = "solwork/scen_RENBAL4", solver = GAMS)
+
+# 3. Solving the model
+solve_model(tmp.dir = "solwork/RENBAL4", wait = FALSE)
+
+# 4. Read the solution
+if (F) {
+  if (!exists("scen_RENBAL4")) load("tmp/scen_RENBAL4.RData")
+  scen_RENBAL4 <- read_solution(scen_RENBAL4, dir.result = "solwork/scen_RENBAL4")
+  summary(scen_RENBAL4)
+  save(scen_RENBAL4, file = "scenarios/scen_RENBAL4.RData")
+  # load("scenarios/scen_RENBAL4.RData")
+}
+
+```
+
+
+# Scenario 5: flexible demand, fixed structure
+```{r scen_RENBAL5, eval=FALSE}
+GRIDINV100BUSD <- newConstraint(
+  'GRIDINV100BUSD', eq = '<=', rhs = 100e3, # 100 Billion USD
+  variable = list(variable = 'vTradeInv'))
+
+CSTGCAP1000 <- newConstraint(
+  'CSTGCAP1K', eq = '<=', rhs = 1000, # GWh
+  variable = list(variable = 'vStorageCap'))
+
+{scen_descr <- "
+INDEM, power sector, balancing version,
+49 regions, 1 hour resolution,
+3 types of renewables, 
+1 type of storage,
+3 (or 4) types of demand,
+no initial stock,
+endogenous UHV grid (neighbours matrix), limited investments to 50BUSD,
+converter stations."}
+
+# 1. Interpolation of parameters
+scen_RENBAL5 <- interpolate(
+  add(mdl, UHV, TRBD_UHV_NEI, ELC2UHV, UHV2ELC, 
+      GRIDINV100BUSD, CSTGCAP1000,
+      DEM100, ELC2DEM100, CELC2DEM100CAPFX, #CELC2DEM100CAPUP,
+      DEM35, ELC2DEM35, CELC2DEM35CAPFX
+      # DSMD, ELC2DSMD, DSMDEXP
+      ), 
+  name = "RENBAL5")
+save(scen_RENBAL5, file = "tmp/scen_RENBAL5_interpolated.RData")
+
+# 2. Writing the model code and data in folder
+write_model(scen_RENBAL5, tmp.dir = "solwork/scen_RENBAL5", solver = GAMS)
+
+# 3. Solving the model
+solve_model(tmp.dir = "solwork/scen_RENBAL5", wait = FALSE)
+# Alterntively, run GAMS directly in the model folder: 'gams mdl'
+
+# 4. Read the solution
+if (F) {
+  if (!exists("scen_RENBAL5")) load("tmp/scen_RENBAL5_interpolated.RData")
+  scen_RENBAL5 <- read_solution(scen_RENBAL5, dir.result = "solwork/scen_RENBAL5")
+  summary(scen_RENBAL5)
+  save("scenarios/scen_RENBAL5.RData")
+  # load("scenarios/scen_RENBAL5.RData")
+}
+
+```
+
+
+
+# Quick check
+```{r}
+# if (!exists("scen_RENBAL1")) load("tmp/scen_RENBAL1.RData")
+# if (!exists("scen_RENBAL2")) load("tmp/scen_RENBAL2.RData")
+# if (!exists("scen_RENBAL3")) load("tmp/scen_RENBAL3.RData")
+# if (!exists("scen_RENBAL4")) load("tmp/scen_RENBAL4.RData")
+if (!exists("scen_RENBAL5")) load("tmp/scen_RENBAL5.RData")
+# scen <- scen_RENBAL1
+# scen <- scen_RENBAL2
+# scen <- scen_RENBAL3
+# scen <- scen_RENBAL4
+scen <- scen_RENBAL5
+
+summary(scen)  
+# Objective (system costs)
+(vObjective <- getData(scen, name = "vObjective", merge = T))
+# sum(pDemand_ELC$value)/1e3
+
+# Price credit
+(vExp_Credit_ELC <- getData(scen, name = "vTradeCost", merge = T))
+
+vObj <- vObjective$value - sum(vExp_Credit_ELC$value)
+
+# Total electricity output from generating technologies
+(vTechOut_ELC <- getData(scen, name = "vTechOut", comm = "ELC", tech_ = "^E", 
+                         merge = T))
+unique(vTechOut_ELC$tech)
+vTechOut_ELC %>%
+  group_by(tech) %>% summarise(TWh = sum(value)/1e3)
+
+# Total demand
+(vExportRow_ELC <- getData(scen, name = "vExport", comm = "DEMY", merge = T))
+sum(vExportRow_ELC$value)
+
+(pDemand_ELC <- getData(scen, name = "pDemand", comm = "ELC", merge = T))
+sum(pDemand_ELC$value)
+
+(dem_tot <- sum(vExportRow_ELC$value) + sum(pDemand_ELC$value))
+
+# Total ELC Output vs Demand
+sum(vTechOut_ELC$value) / dem_tot
+
+# System costs USD/kWh (== MUSD/GWh)
+## for electricity consumed
+vObj / dem_tot
+# vObjective$value / sum(pDemand_ELC$value) / 3
+## for electricity produced
+vObj / sum(vTechOut_ELC$value)
+
+# Supply curtailments
+(vExportROW_ELC <- getData(scen, name = "vExportRow", merge = T)) # if EEXP used
+sum(vExportROW_ELC$value)/dem_tot
+
+(vBalance_ELC <- getData(scen, name = "vBalance", comm = c("ELC", "UHV"), merge = T)) 
+sum(vBalance_ELC$value)/dem_tot * 100 # % of demand
+
+# Demand curtailments
+(vImportROW_ELC <- getData(scen, name = "vImportRow", merge = T)) 
+sum(vImportROW_ELC$value)/dem_tot * 100 # %
+
+# Generating and storage capacity 
+(vTechStgCap <- getData(scen, name = c("vTechCap", "vStorageCap"), merge = T, process = T))
+vTechStgCap %>%
+  group_by(scenario, process, year) %>%
+  summarise(GW = sum(value))
+
+vTechStgCap %>%
+  group_by(region, process) %>%
+  summarise(GW = round(sum(value))) %>%
+  pivot_wider(names_from = process, values_from = GW) %>%
+  left_join(reg_area) %>% select(-area_km2) %>%
+  mutate(sol_max_GW = round(sol_max_GW), win_max_GW = round(win_max_GW)) %>%
+  as.data.frame()
+
+# Storage capacity
+getData(scen, name = "vStorageCap", merge = T)
+sum(getData(scen, name = "vStorageCap", merge = T)$value)
+getData(scen, name = "vStorageCap", merge = T) %>%
+  group_by(scenario, stg, region, year) %>%
+  summarize(GW = sum(value))
+
+# (vStorageCap_STGP2X <- getData(scen, name = "vStorageCap", merge = T, stg = "STGP2P"))
+(vStorageCap_STGBTR <- getData(scen, name = "vStorageCap", merge = T, stg = "STGBTR"))
+# sum(vStorageCap_STGP2X$value) # GWh - interdday (~seasonal) storage
+sum(vStorageCap_STGBTR$value) # GWh - intraday (hourly) storage
+sum(vStorageCap_STGBTR$value)/dem_tot * 100
+# sum(vStorageCap_STGP2X$value)/dem_tot * 100
+
+```
+
+# Shape of supply
+```{r}
+(vTechOut_ELC <- getData(scen, name = "vTechOut", comm = "ELC", 
+                         tech_ = "^E",
+                         merge = T, newNames = c("value" = "GWh")))
+summary(vTechOut_ELC$GWh)
+unique(vTechOut_ELC$tech)
+
+supy <- vTechOut_ELC %>%
+  mutate(hour = as.integer(substr(slice, 7,8))) %>%
+  group_by(scenario, year, hour, tech) %>%
+  summarize(TWh = sum(GWh)/1e3) %>%
+  mutate(tech = factor(tech, 
+                       levels = c("ESOL", "EWFF", "EWIN"), 
+                       ordered = T))
+
+ggplot(supy) + 
+  geom_area(aes(x = hour, y = TWh, fill = tech), stat = "identity") +
+  labs(title = "Annual generation profile")
+
+
+supm <- vTechOut_ELC %>%
+  mutate(#hour = as.integer(substr(slice, 7,8)),
+         month = month(as.Date ("2017-01-01") + as.integer(substr(slice, 2, 4)) - 1)) %>%
+  mutate(month.name = factor(month.name[month], levels = month.name[1:12], ordered = T)) %>%
+  group_by(scenario, year, month, month.name, tech) %>%
+  summarize(TWh = sum(GWh)/1e3) %>%
+  mutate(tech = factor(tech, 
+                       levels = c("ESOL", "EWFF", "EWIN"), 
+                       ordered = T))
+ggplot(supm) + 
+  geom_bar(aes(x = month.name, y = TWh, fill = tech), stat = "identity") 
+
+```
+
+# Capacity maps
+```{r Capacity_maps}
+vCap <- getData(scen, name = c("vTechCap", "vStorageCap"), merge = T, process = T)
+
+lev <- unique(vCap$process)
+vCap$process <- factor(vCap$process, levels = lev, ordered = T)
+
+# Technologies capacity
+ggplot(data = ind) + 
+  geom_polygon(aes(x = long, y = lat, group = group), fill = "grey85", 
+                   colour = "white", alpha = 1, size = .5) +
+    geom_polygon(aes(x = long, y = lat, group = group, fill = value),
+                     data = right_join(ind, vCap, by = c("id" = "region")), #fill = "wheat", 
+                 color = "white", alpha = 1, size = 0.25, inherit.aes = F) + # aes fill = id, 
+  coord_fixed(1.0) +
+  theme_void() +
+  # scale_fill_distiller(palette = "Spectral", direction = -1, name = "GW") +
+  scale_fill_distiller(palette = "Spectral", direction = -1, trans = "log10", name = "GW") +
+  labs(title = "Installed technologies") +
+  theme(plot.title = element_text(hjust = 0.5), 
+        plot.subtitle = element_text(hjust = 0.5)) +
+  facet_wrap(.~process, ncol = 2)
+
+```
+
+# Storage operation
+```{r }
+# getData(scen, name_ = "vStorage")
+
+# (vStorageInp_STGP2P <- getData(scen, name = "vStorageInp", merge = T, stg = "STGP2P"))
+# max(vStorageInp_STGP2P$value)
+
+(vSTGBTR <- getData(scen, 
+          name = c("vStorageInp", "vStorageOut", "vStorageStore"),
+          merge = T, stg = "STGBTR", slice_ = "d10[1-2]", region = "CT"))
+
+ggplot(vSTGBTR) + 
+  geom_bar(aes(x = slice, y = value, fill = name), stat = "identity") +
+  theme(axis.text.x = element_text(angle = 90))
+
+tSTGBTR <- vSTGBTR %>%
+  spread(key = name, value = value)
+
+summary(tSTGBTR$vStorageInp)
+summary(tSTGBTR$vStorageOut)
+summary(tSTGBTR$vStorageStore)
+
+
+# (vSTGP2P <- getData(scen, 
+#           name = c("vStorageInp", "vStorageOut", "vStorageStore"),
+#           merge = T, stg = "STGP2P", slice_ = "d01", region = "ND"))
+# 
+# ggplot(vSTGP2P) + 
+#   geom_bar(aes(x = slice, y = value, fill = name), stat = "identity") +
+#   # theme_void() +
+#   theme(axis.text.x = element_text(angle = 90))
+#   
+
+```
+
+
+# Trade flows maps
+```{r Trade flows}
+scen@name
+trdIr <- getData(scen, name = "vTradeIr", merge = T)
+summary(trdIr$value)
+# summary(convert("PJ", "GWh", trdIr$value))
+trdIr[which(trdIr$value == max(trdIr$value)), ]
+tt <- sort(unique(trdIr$trade))
+tt
+
+trdIr_year <- trdIr %>%
+  group_by(src, dst, year) %>%
+  # summarize(TWh = convert("PJ", "TWh", sum(value)))
+  summarize(
+    GW = max(value),
+    GWh = sum(value))
+trdIr_year
+
+trd_elc_y <- trdIr_year %>%
+  left_join(reg_centers, by = c("src" = "region")) %>%
+  rename(xsrc = x, ysrc = y) %>%
+  left_join(reg_centers, by = c("dst" = "region")) %>%
+  rename(xdst = x, ydst = y) 
+
+
+# trd_elc_y <- left_join(trdIr_year, trd_map)
+summary(trd_elc_y$GWh)/24/365
+summary(trd_elc_y$GW)
+trd_elc_y[is.na(trd_elc_y$GWh),]
+
+# trd_flows_map
+trd_flows_map2 <-
+ggplot(data = ind) + 
+    geom_polygon(aes(x = long, y = lat, group = group), fill = "wheat", 
+                 colour = "white", alpha = 1, size = .5) + # aes fill = id, 
+    coord_fixed(1.0) +
+    guides(fill=FALSE) +  # do this to leave off the color legend
+    theme_void() + labs(title = "Annual electricity trade flows")  + 
+    theme(plot.title = element_text(hjust = 0.5), 
+          plot.subtitle = element_text(hjust = 0.5)) +
+    geom_segment(aes(x=xsrc, y=ysrc, xend=xdst, yend=ydst, size = GWh/1e3), 
+    # geom_segment(aes(x=xsrc, y=ysrc, xend=xdst, yend=ydst, size = GWh/1e3), 
+    # geom_segment(aes(x=xsrc, y=ysrc, xend=xdst, yend=ydst, size = GWh/1e2/8760), 
+                 data = trd_elc_y, inherit.aes = FALSE, #size = 3, 
+                 alpha = 1, colour = "dodgerblue", lineend = "round", show.legend = T) +
+    scale_size_continuous(name = "TWh") +
+    geom_point(data = reg_centers, aes(x, y), colour = "red") +
+    geom_segment(aes(x=xsrc, y=ysrc, xend=xdst, yend=ydst), 
+                 data = trd_elc_y, inherit.aes = FALSE, size = .1, 
+             arrow = arrow(type = "closed", angle = 15, 
+                           length = unit(0.15, "inches")),
+             colour = "white", alpha = 0.75, 
+             lineend = "butt", linejoin = "mitre", show.legend = T)
+
+trd_flows_map2
+# cowplot::plot_grid(trd_flows_map, trd_flows_map2)
+
+
+
+```
+
+# Grid capacity
+```{r Grid_cap}
+scen@name
+vTradeCap <- getData(scen, name = "vTradeCap", merge = T, newNames = c("value" = "GW"))
+summary(vTradeCap$GW)
+# summary(convert("PJ", "GWh", trdIr$value))
+# vTradeCap[which(vTradeCap$GW == max(vTradeCap$GW)), ]
+
+vTradeInv <- getData(scen, "vTradeInv", merge = T)
+sum(vTradeInv$value)
+
+# getData(scen, name_ = "pTrade", merge = F)
+getData(scen, name = "vTradeNewCap")
+
+vTradeCap <- vTradeCap %>%
+  full_join(trd_dt) %>%
+  left_join(reg_centers, by = c("src" = "region")) %>%
+  rename(xsrc = x, ysrc = y) %>%
+  left_join(reg_centers, by = c("dst" = "region")) %>%
+  rename(xdst = x, ydst = y) 
+    
+
+ii <- vTradeCap$GW >= 0 # filter grid capacity if needed
+
+trd_cap_map <-
+ggplot(data = ind) + 
+  geom_polygon(aes(x = long, y = lat, group = group), fill = "wheat", 
+               colour = "white", alpha = 1, size = .5) + # aes fill = id, 
+  coord_fixed(1.) +
+  guides(fill=FALSE) +  # do this to leave off the color legend
+  theme_void() + labs(title = "Optimized UHV grid capacity")  + 
+  theme(plot.title = element_text(hjust = 0.5), 
+        plot.subtitle = element_text(hjust = 0.5)) +
+  geom_segment(aes(x=xsrc, y=ysrc, xend=xdst, yend=ydst, size = GW), 
+  # geom_segment(aes(x=xsrc, y=ysrc, xend=xdst, yend=ydst, size = GWh/1e3), 
+  # geom_segment(aes(x=xsrc, y=ysrc, xend=xdst, yend=ydst, size = GWh/1e2/8760), 
+               data = vTradeCap[ii,], inherit.aes = FALSE, #size = 3, 
+               alpha = 1, colour = "dodgerblue", lineend = "round", show.legend = T) +
+  scale_size_continuous(range = c(1, 5)) +
+  geom_segment(aes(x=xsrc, y=ysrc, xend=xdst, yend=ydst), 
+               data = vTradeCap[ii,], inherit.aes = FALSE, size = .1, 
+           # arrow = arrow(type = "closed", angle = 15, 
+           #               length = unit(0.15, "inches")),
+           colour = "white", alpha = 0.75, 
+           lineend = "butt", linejoin = "mitre", show.legend = T) +
+  geom_point(data = reg_centers, aes(x, y), colour = "white")
+trd_cap_map
+
+# plot_grid(trd_cap_map, trd_flows_map2)
+
+```
+
