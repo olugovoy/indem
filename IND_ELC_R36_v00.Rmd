@@ -13,6 +13,8 @@ editor_options:
   chunk_output_type: console
 ---
 (WORK IN PROGRESS!)
+**!!!Note:** due to recent changes in R version 4, some functions of *energyRt* are not working correctly. 
+**R version 3.6.3 is recommended.**  
 
 # Changes log   
 
@@ -28,6 +30,7 @@ library(energyRt)
 library(lubridate)
 library(tibble)
 library(tidyverse)
+library(sf)
 source("solver_options.R")
 # mySolver <- "GLPK" # not capable enough for large models
 # mySolver <- "GAMS" # default LP solver will be used (CPLEX is recommended)
@@ -59,10 +62,11 @@ load("data/model_regs.RData")
 
 gis_ii <- gis_sp$region %in% reg_names
 
-plot(gis_sf[gis_ii, "region"], border = rgb(1,1,1,0.3), key.pos=NULL)
+plot(gis_sf[gis_ii, "region"], border = rgb(1,1,1,0.3), key.pos=NULL,
+     main = paste(sum(gis_ii), "regions"))
 
 # Neighbor regions
-# if (!any((installed.packages())[, "Package"] == "spdep")) install.packages("spdep")
+if (!any((installed.packages())[, "Package"] == "spdep")) install.packages("spdep")
 # nbr <- spdep::poly2nb(gis_sp)
 nbr <- spdep::poly2nb(gis_sp[gis_ii,])
 names(nbr) <- gis_sp@data$region[gis_ii]
@@ -1111,7 +1115,7 @@ if (F) {
 
 ```
 
-# Scenario 2: Exogenous grid 100GW between neighbours
+# Scenario 2: Exogenous UHV grid 100GW, endogenous converter stations 
 ~ 5h to solve
 ```{r scen_RENBAL2, eval=T}
 # (optional) Scenario info:
@@ -1150,7 +1154,7 @@ if (F) {
 
 ```
 
-## Scenario 2a: Exogenous UHV grid 100GW between neighbours (no capacity variable), endogenous converter stations
+## Scenario 2a: Exogenous UHV grid 100GW (no capacity variable), endogenous converter stations
 ~ 8h to solve
 ```{r scen_RENBAL2a, eval=T}
 # (optional) Scenario info:
@@ -1189,7 +1193,7 @@ if (F) {
 
 ```
 
-## Scenario 2b: Exogenous ELC grid 100GW between neighbours, fixed capacity
+## Scenario 2b: Exogenous ELC grid 100GW, fixed capacity
 ~ 15 min to solve
 ```{r scen_RENBAL2b, eval=T}
 # (optional) Scenario info:
@@ -1229,7 +1233,7 @@ if (F) {
 ```
 
 
-## Scenario 2c: Exogenous grid 100GW between neighbours (no capacity variable) 
+## Scenario 2c: Exogenous grid 100GW (no capacity variable) 
 ~ 11 min GAMS time
 ```{r scen_RENBAL2c, eval=T}
 # (optional) Scenario info:
@@ -1268,7 +1272,7 @@ if (F) {
 
 ```
 
-# Scenario 3: Endogenous grid  
+# Scenario 3: Endogenous UHV grid and converter stations  
 ~ 8h GAMS time
 ```{r scen_RENBAL3, eval=T}
 # (optional) Scenario info:
@@ -1306,7 +1310,7 @@ if (F) {
 
 ```
 
-# Scenario 4: Constraints on investments in UHV grid
+# Scenario 4: Constraints on investments in UHV grid  
 ```{r scen_RENBAL4, eval=FALSE}
 # Unrestricted (optimal) grid capacity from "RENBAL3"
 msy <- mdl@sysInfo@milestone$mid
@@ -1355,7 +1359,7 @@ if (F) {
 ```
 
 
-# Scenario 5: flexible demand, fixed structure
+# Scenario 5: flexible demand, fixed structure  
 ```{r scen_RENBAL5, eval=FALSE}
 GRIDINV100BUSD <- newConstraint(
   'GRIDINV100BUSD', eq = '<=', rhs = 100e3, # 100 Billion USD
