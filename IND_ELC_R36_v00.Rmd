@@ -9,7 +9,17 @@ output:
   html_document:
     toc: yes
     toc_depth: 5
+editor_options: 
+  chunk_output_type: console
 ---
+(WORK IN PROGRESS!)
+
+# Changes log   
+
+June 3, 2020:  
+- updated maps  
+- added scenarios (2x) with alternative specification of the grid  
+
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -34,31 +44,34 @@ myear <- 2050 # model year
 
 # GIS info, map
 ```{r}
-load("data/IND_adm1.RData")
+(load("data/maps/india_adm1_light.RData"))
+gis_sp <- india_light_sp
+gis_sf <- india_light_sf
+gis_df <- india_light_df
 load("data/model_regs.RData")
 
-# (reg_names <- unique(as.character(IND@data$region)))
+# (reg_names <- unique(as.character(gis_sp@data$region)))
 (reg_names <- unique(as.character(model_regs)))
-(reg_names_in_gis <- as.character(IND@data$region))
+(reg_names_in_gis <- as.character(gis_sp@data$region))
 
 (nreg <- length(reg_names))
-(nreg_in_gis <- length(IND@data$region))
+(nreg_in_gis <- length(gis_sp@data$region))
 
-gis_ii <- IND$region %in% reg_names
+gis_ii <- gis_sp$region %in% reg_names
 
-plot(IND[gis_ii,])
+plot(gis_sf[gis_ii, "region"], border = rgb(1,1,1,0.3), key.pos=NULL)
 
 # Neighbor regions
 # if (!any((installed.packages())[, "Package"] == "spdep")) install.packages("spdep")
-# nbr <- spdep::poly2nb(IND)
-nbr <- spdep::poly2nb(IND[gis_ii,])
-names(nbr) <- IND@data$region[gis_ii]
+# nbr <- spdep::poly2nb(gis_sp)
+nbr <- spdep::poly2nb(gis_sp[gis_ii,])
+names(nbr) <- gis_sp@data$region[gis_ii]
 
 # Centers of the regions
-reg_centers <- getCenters(IND[gis_ii,])
+reg_centers <- getCenters(gis_sp[gis_ii,])
 reg_area <- tibble(
   region = reg_centers$region,
-  area_km2 = raster::area(IND[gis_ii,]) / 1e6
+  area_km2 = raster::area(gis_sp[gis_ii,]) / 1e6
 )
   
 
@@ -172,6 +185,25 @@ sum(DEM_ELC_DH@dem$dem); sum(dmd$consum_GWh)
 summary(DEM_ELC_DH@dem$dem)
 # Annual base-year demand
 elc_dem_BY_GWh <- sum(DEM_ELC_DH@dem$dem)
+
+loadcurve_YDAY <- loadcurve %>% 
+  mutate(YDAY = substr(slice, 1, 4)) %>%
+  group_by(region, YDAY) %>%
+  summarise(GWh = sum(GWh))
+
+DEM_ELCD <- newDemand(
+  name = "DEM_ELCD",
+  description = "Demand by regions, year-days",
+  commodity = "ELCD",
+  dem = data.frame(
+    year = myear, 
+    region = loadcurve_YDAY$region,
+    slice = loadcurve_YDAY$YDAY, 
+    dem = round(loadcurve_YDAY$GWh, 7)
+    )
+)
+
+sum(DEM_ELCD@dem$dem)
 
 
 ```
@@ -470,7 +502,7 @@ RES_WFF <- newSupply(
 
 ```
 
-# Power generating technologies
+# Power generating technologies  
 
 ```{r Technologies}
 
@@ -756,7 +788,7 @@ trd_flows_map
 # ggsave("fig/trd_flows_map.pdf", trd_flows_map, device = "pdf")
 }
 # Calculate distance between regions centers:
-# labpt <- get_labpt_spdf(IND)
+# labpt <- get_labpt_spdf(gis_sp)
 labpt <- reg_centers
 # rownames(labpt) <- labpt[,"region"]
 
@@ -864,10 +896,15 @@ for (i in 1:length(TRBD_UHV_NEI_FX@data)) {
 
 # Dropping UHV and converter stations, i.e. trade with ELC
 TRBD_ELC_NEI_FX_CAP <- TRBD_UHV_NEI_FX_CAP # Grid with fixed capacity
+TRBD_ELC_NEI_FX <- TRBD_UHV_NEI_FX
 for (i in 1:length(TRBD_ELC_NEI_FX_CAP@data)) {
   TRBD_ELC_NEI_FX_CAP@data[[i]]@name <- sub("_UHV_", "_ELC_", TRBD_ELC_NEI_FX_CAP@data[[i]]@name)
   TRBD_ELC_NEI_FX_CAP@data[[i]]@commodity <- "ELC"
+  
+  TRBD_ELC_NEI_FX@data[[i]]@name <- sub("_UHV_", "_ELC_", TRBD_ELC_NEI_FX@data[[i]]@name)
+  TRBD_ELC_NEI_FX@data[[i]]@commodity <- "ELC"
 }
+
 rm(trd, trd_empty)
 
 ```
@@ -987,7 +1024,7 @@ reps <- add(newRepository('main_repository'),
   ESOL, EWIN, EWFF,
   CSOL_UP,
   # Storage
-  STGBTR, 
+  # STGBTR, 
   #STGP2P1,
   # Simplified interregional ELC trade
   # TRD_ELC_ALL,
@@ -1020,7 +1057,7 @@ mdl <- newModel(
                HOUR = timeslices365$HOUR
                ),
   repository = reps,
-  # GIS = IND,
+  # GIS = gis_sp,
   early.retirement = F)
 
 # Check the model time-slices
@@ -1045,11 +1082,11 @@ no initial stock."}
 ```
 
 # Scenario 1: No interregional trade  
-
-```{r scen_RENBAL1, eval=FALSE}
+~ 4 mins to solve
+```{r scen_RENBAL1, eval=F}
 # Workflow to solve the model (recommended for large models):
 # 1. Interpolation of parameters
-scen_RENBAL1 <- interpolate(add(mdl, DEM_ELC_DH), name = "RENBAL1", 
+scen_RENBAL1 <- interpolate(add(mdl, STGBTR, DEM_ELC_DH), name = "RENBAL1", 
   description = "No inter-regional dispatch.")
 size(scen_RENBAL1)
 
@@ -1075,7 +1112,8 @@ if (F) {
 ```
 
 # Scenario 2: Exogenous grid 100GW between neighbours
-```{r scen_RENBAL2, eval=FALSE}
+~ 5h to solve
+```{r scen_RENBAL2, eval=T}
 # (optional) Scenario info:
 {scen_descr <- "
 India power sector, renewables balancing version,
@@ -1089,7 +1127,7 @@ converter stations."}
 
 # 1. Interpolation of parameters
 scen_RENBAL2 <- interpolate(
-  add(mdl, UHV, TRBD_UHV_NEI_FX_CAP, ELC2UHV, UHV2ELC, DEM_ELC_DH), 
+  add(mdl, STGBTR, UHV, TRBD_UHV_NEI_FX_CAP, ELC2UHV, UHV2ELC, DEM_ELC_DH), 
   name = "RENBAL2", description = scen_descr)
 
 # 2. Writing the model code and data in folder
@@ -1112,8 +1150,127 @@ if (F) {
 
 ```
 
-# Scenario 3: Endogenous grid
-```{r scen_RENBAL3, eval=FALSE}
+## Scenario 2a: Exogenous UHV grid 100GW between neighbours (no capacity variable), endogenous converter stations
+~ 8h to solve
+```{r scen_RENBAL2a, eval=T}
+# (optional) Scenario info:
+{scen_descr <- "
+India power sector, renewables balancing version,
+30 regions, 1 hour resolution,
+exogenous hourly demand,
+3 types of renewables, 
+1 types of storage,
+no initial stock,
+exogenous 100GW UHV grid between all regions,
+converter stations."}
+
+# 1. Interpolation of parameters
+scen_RENBAL2a <- interpolate(
+  add(mdl, STGBTR, UHV, TRBD_UHV_NEI_FX, ELC2UHV, UHV2ELC, DEM_ELC_DH), 
+  name = "RENBAL2a", description = scen_descr)
+
+# 2. Writing the model code and data in folder
+write_model(scen_RENBAL2a, tmp.dir = "solwork/scen_RENBAL2a", solver = GAMS)
+save(scen_RENBAL2a, file = "tmp/scen_RENBAL2a.RData")
+
+# 3. Solving the model
+solve_model(tmp.dir = "solwork/scen_RENBAL2a", wait = F)
+# Alterntively, run GAMS directly in the model folder: 'gams mdl'
+
+# 4. Read the solution
+if (F) {
+  if (!exists("scen_RENBAL2a")) load("tmp/scen_RENBAL2a.RData")
+  summary(scen_RENBAL2a)
+  scen_RENBAL2a <- read_solution(scen_RENBAL2a, dir.result = "solwork/scen_RENBAL2a")
+  summary(scen_RENBAL2a)
+  save(scen_RENBAL2a, file = "scenarios/scen_RENBAL2a.RData")
+# load("scenarios/scen_RENBAL2a.RData")
+}
+
+```
+
+## Scenario 2b: Exogenous ELC grid 100GW between neighbours, fixed capacity
+~ 15 min to solve
+```{r scen_RENBAL2b, eval=T}
+# (optional) Scenario info:
+{scen_descr <- "
+India power sector, renewables balancing version,
+30 regions, 1 hour resolution,
+exogenous hourly demand,
+3 types of renewables, 
+1 types of storage,
+no initial stock,
+exogenous 100GW UHV grid between all regions,
+converter stations."}
+
+# 1. Interpolation of parameters
+scen_RENBAL2b <- interpolate(
+  add(mdl, STGBTR, TRBD_ELC_NEI_FX_CAP, DEM_ELC_DH), 
+  name = "RENBAL2b", description = scen_descr)
+
+# 2. Writing the model code and data in folder
+write_model(scen_RENBAL2b, tmp.dir = "solwork/scen_RENBAL2b", solver = GAMS)
+save(scen_RENBAL2b, file = "tmp/scen_RENBAL2b.RData")
+
+# 3. Solving the model
+solve_model(tmp.dir = "solwork/scen_RENBAL2b", wait = F)
+# Alterntively, run GAMS directly in the model folder: 'gams mdl'
+
+# 4. Read the solution
+if (F) {
+  if (!exists("scen_RENBAL2b")) load("tmp/scen_RENBAL2b.RData")
+  summary(scen_RENBAL2b)
+  scen_RENBAL2b <- read_solution(scen_RENBAL2b, dir.result = "solwork/scen_RENBAL2b")
+  summary(scen_RENBAL2b)
+  save(scen_RENBAL2b, file = "scenarios/scen_RENBAL2b.RData")
+# load("scenarios/scen_RENBAL2b.RData")
+}
+
+```
+
+
+## Scenario 2c: Exogenous grid 100GW between neighbours (no capacity variable) 
+~ 11 min GAMS time
+```{r scen_RENBAL2c, eval=T}
+# (optional) Scenario info:
+{scen_descr <- "
+India power sector, renewables balancing version,
+30 regions, 1 hour resolution,
+exogenous hourly demand,
+3 types of renewables, 
+1 types of storage,
+no initial stock,
+exogenous 100GW UHV grid between all regions,
+converter stations."}
+
+# 1. Interpolation of parameters
+scen_RENBAL2c <- interpolate(
+  add(mdl, STGBTR, TRBD_ELC_NEI_FX, DEM_ELC_DH), 
+  name = "RENBAL2c", description = scen_descr)
+
+# 2. Writing the model code and data in folder
+write_model(scen_RENBAL2c, tmp.dir = "solwork/scen_RENBAL2c", solver = GAMS)
+save(scen_RENBAL2c, file = "tmp/scen_RENBAL2c.RData")
+
+# 3. Solving the model
+solve_model(tmp.dir = "solwork/scen_RENBAL2c", wait = F)
+# Alterntively, run GAMS directly in the model folder: 'gams mdl'
+
+# 4. Read the solution
+if (F) {
+  if (!exists("scen_RENBAL2c")) load("tmp/scen_RENBAL2c.RData")
+  summary(scen_RENBAL2c)
+  scen_RENBAL2c <- read_solution(scen_RENBAL2c, dir.result = "solwork/scen_RENBAL2c")
+  summary(scen_RENBAL2c)
+  save(scen_RENBAL2c, file = "scenarios/scen_RENBAL2c.RData")
+# load("scenarios/scen_RENBAL2c.RData")
+}
+
+```
+
+# Scenario 3: Endogenous grid  
+~ 8h GAMS time
+```{r scen_RENBAL3, eval=T}
 # (optional) Scenario info:
 {scen_descr <- "
 India power sector, balancing version,
@@ -1128,7 +1285,7 @@ converter stations."}
 
 # 1. Interpolation of parameters
 scen_RENBAL3 <- interpolate(
-  add(mdl, UHV, TRBD_UHV_NEI, ELC2UHV, UHV2ELC, DEM_ELC_DH), 
+  add(mdl, STGBTR, UHV, TRBD_UHV_NEI, ELC2UHV, UHV2ELC, DEM_ELC_DH), 
   name = "RENBAL3", description = scen_descr)
 save(scen_RENBAL3, "tmp/scen_RENBAL3.RData")
 
@@ -1247,6 +1404,25 @@ if (F) {
 
 ```
 
+# Scenario 6: 3 levels of demand, endogenous structure, no trade, no storage  
+```{r}
+
+```
+
+# Scenarion 7: 3 levels of demand, endogenous structure, fixed grid, limited storage  
+```{r}
+
+```
+
+# Scenario 8: 
+```{r}
+
+```
+
+# Scenario 9: 
+```{r}
+
+```
 
 
 # Quick check
@@ -1257,7 +1433,7 @@ if (!exists("scen_RENBAL3")) load("scenarios/scen_RENBAL3.RData")
 # if (!exists("scen_RENBAL4")) load("scenarios/scen_RENBAL4.RData")
 # if (!exists("scen_RENBAL5")) load("scenarios/scen_RENBAL5.RData")
 # scen <- scen_RENBAL1
-# scen <- scen_RENBAL2
+scen <- scen_RENBAL2
 scen <- scen_RENBAL3
 # scen <- scen_RENBAL4
 # scen <- scen_RENBAL5
@@ -1270,7 +1446,7 @@ summary(scen)
 # Price credit
 (vExp_Credit_ELC <- getData(scen, name = "vTradeCost", merge = T))
 
-vObj <- vObjective$value - sum(vExp_Credit_ELC$value)
+(vObj <- vObjective$value - sum(vExp_Credit_ELC$value))
 
 # Total electricity output from generating technologies
 (vTechOut_ELC <- getData(scen, name = "vTechOut", comm = "ELC", tech_ = "^E", 
@@ -1373,6 +1549,81 @@ ggplot(supm) +
   geom_bar(aes(x = month.name, y = TWh, fill = tech), stat = "identity") 
 
 ```
+
+# Demand structure
+```{r}
+# Export-based demand
+DemStr <- getData(scen, name = c("vTechInp"), tech_ = "LOAD|DSM", comm = "ELC", 
+                  merge = T, process = T)
+unique(DemStr$process)
+
+dem <- DemStr %>%
+  mutate(hour = as.integer(substr(slice, 7,8))) %>%
+  rename(GWh = value)
+
+
+ii <- grepl("d101_", dem$slice)
+# ii <- ii & grepl("NY", dem$region)
+# ii <- ii & grepl("DEM100", dem$comm)
+
+ggplot(dem[ii,]) +
+  geom_bar(aes(x = hour, y = GWh, fill = process), stat = "identity") +
+  # scale_y_continuous(trans = "log10") +
+  facet_wrap(.~region, scales = "free_y")
+
+demy <- dem %>%
+  group_by(hour, process) %>%
+  summarise(TWh = sum(GWh)/100)
+
+ggplot(demy) +
+  geom_area(aes(x = hour, y = TWh, fill = process), stat = "identity") 
+  # scale_y_continuous(trans = "log10") +
+  # facet_wrap(.~region, scales = "free_y")
+
+demry <- dem %>%
+  group_by(region, hour, process) %>%
+  summarise(TWh = sum(GWh)/100)
+
+ggplot(demry) +
+  geom_area(aes(x = hour, y = TWh/1000, fill = process), stat = "identity") +
+  # scale_y_continuous(trans = "log10") +
+  # facet_wrap(.~region)
+  facet_wrap(.~region, scales = "free_y")
+
+
+demmh <- dem %>%
+  mutate(hour = as.integer(substr(slice, 7,8)),
+         month = month(as.Date ("2050-01-01") + as.integer(substr(slice, 2, 4)) - 1)) %>%
+  mutate(month.name = factor(month.name[month], levels = month.name[1:12], ordered = T)) %>%
+  group_by(scenario, year, hour, month.name, process) %>%
+  summarize(TWh = sum(GWh)/1e3) #%>%
+demmh
+
+ggplot(demmh) +
+  geom_area(aes(x = hour, y = TWh, fill = process), stat = "identity") +
+  # scale_y_continuous(trans = "log10") +
+  facet_wrap(.~month.name, nrow = 4)
+
+demmy <- dem %>%
+  mutate(hour = as.integer(substr(slice, 7,8)),
+         month = month(as.Date ("2050-01-01") + as.integer(substr(slice, 2, 4)) - 1)) %>%
+  mutate(month.name = factor(month.name[month], levels = month.name[1:12], ordered = T)) %>%
+  mutate(month.abb = factor(month.abb[month], levels = month.abb[1:12], ordered = T)) %>%
+  group_by(scenario, year, month, month.abb, month.name, process) %>%
+  summarize(TWh = sum(GWh)/1e3) #%>%
+demmy
+
+ggplot(demmy) +
+  geom_bar(aes(x = month.abb, y = TWh, fill = process), stat = "identity") 
+  # scale_y_continuous(trans = "log10") +
+  # facet_wrap(.~month.name, nrow = 4)
+
+ggplot(demmy) +
+  geom_area(aes(x = month, y = TWh, fill = process), stat = "identity") +
+  scale_x_continuous(breaks = 1:12, labels = 1:12)
+
+```
+
 
 # Capacity maps
 ```{r Capacity_maps}
