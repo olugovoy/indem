@@ -13,10 +13,10 @@ editor_options:
   chunk_output_type: console
 ---
 (WORK IN PROGRESS!)
-**!!!Note:** due to recent changes in R version 4, some functions of *energyRt* are not working correctly. 
-**R version 3.6.3 is recommended.**  
 
 # Changes log   
+June 9, 2020  
+- works with R 4.0.1 version (requires *energyRt* v0.1.10+)  
 
 June 3, 2020:  
 - updated maps  
@@ -48,34 +48,37 @@ myear <- 2050 # model year
 # GIS info, map
 ```{r}
 (load("data/maps/india_adm1_light.RData"))
-gis_sp <- india_light_sp
-gis_sf <- india_light_sf
-gis_df <- india_light_df
+# gis_sp <- india_light_sp
+# gis_sf <- india_light_sf
+# gis_df <- india_light_df
 load("data/model_regs.RData")
 
 # (reg_names <- unique(as.character(gis_sp@data$region)))
 (reg_names <- unique(as.character(model_regs)))
-(reg_names_in_gis <- as.character(gis_sp@data$region))
+(reg_names_in_gis <- as.character(india_light_sp@data$region))
 
 (nreg <- length(reg_names))
-(nreg_in_gis <- length(gis_sp@data$region))
+(nreg_in_gis <- length(india_light_sp@data$region))
 
-gis_ii <- gis_sp$region %in% reg_names
+gis_ii <- india_light_sp$region %in% reg_names
+gis_sp <- india_light_sp[gis_ii,]
+gis_sf <- india_light_sf[gis_ii,]
+gis_df <- fortify(gis_sp, region = "region") %>% as_tibble()
 
-plot(gis_sf[gis_ii, "region"], border = rgb(1,1,1,0.3), key.pos=NULL,
+plot(gis_sf[, "region"], border = rgb(1,1,1,0.3), key.pos=NULL,
      main = paste(sum(gis_ii), "regions"))
 
 # Neighbor regions
 if (!any((installed.packages())[, "Package"] == "spdep")) install.packages("spdep")
 # nbr <- spdep::poly2nb(gis_sp)
-nbr <- spdep::poly2nb(gis_sp[gis_ii,])
-names(nbr) <- gis_sp@data$region[gis_ii]
+nbr <- spdep::poly2nb(india_light_sp, row.names = india_light_sp$region)
+# names(nbr) <- gis_sp@data$region
 
 # Centers of the regions
-reg_centers <- getCenters(gis_sp[gis_ii,])
+reg_centers <- getCenters(gis_sp)
 reg_area <- tibble(
   region = reg_centers$region,
-  area_km2 = raster::area(gis_sp[gis_ii,]) / 1e6
+  area_km2 = raster::area(gis_sp) / 1e6
 )
   
 
@@ -722,23 +725,23 @@ if (F) {
   rownames(trd_nbr) <- trd_xl$region
 } else { 
   # Or create trade matrix for all neighbour regions
-  # trd_nbr <- matrix(rep(NA, nreg_in_gis*nreg_in_gis),
-  #                   nrow = nreg_in_gis,
-  #                   dimnames = list(reg_names_in_gis, reg_names_in_gis))
-  trd_nbr <- matrix(rep(NA, nreg*nreg),
-                    nrow = nreg,
-                    dimnames = list(reg_names, reg_names))
+  trd_nbr <- matrix(rep(NA, nreg_in_gis*nreg_in_gis),
+                    nrow = nreg_in_gis,
+                    dimnames = list(reg_names_in_gis, reg_names_in_gis))
+  # trd_nbr <- matrix(rep(NA, nreg*nreg),
+  #                   nrow = nreg,
+  #                   dimnames = list(reg_names, reg_names))
   head(trd_nbr)
   dim(trd_nbr)
   
-  for (i in 1:length(reg_names)) {
+  for (i in 1:length(reg_names_in_gis)) {
     trd_nbr[i, nbr[[i]]] <- 1
     trd_nbr[nbr[[i]], i] <- 1
   }
   dim(trd_nbr)
   summary(!is.na(c(trd_nbr)))
-  # ii <- reg_names_in_gis %in% reg_names
-  ii <- reg_names %in% reg_names
+  ii <- reg_names_in_gis %in% reg_names
+  # ii <- reg_names %in% reg_names
   trd_nbr <- trd_nbr[ii, ii]
   dim(trd_nbr)
   # For bidirectional trade, keep only one direction
@@ -761,16 +764,15 @@ trd_dt$trade <- with(trd_dt, paste0("TRBD_UHV_", src, "_", dst))
 head(trd_dt)
 
 # Map region flows
-trd_map <- left_join(trd_dt, reg_centers[,1:3], by = c("src" = "region"))
-trd_map <- left_join(trd_map, reg_centers[,1:3], by = c("dst" = "region"))
-trd_map <- trd_map %>% 
+trd_map <- left_join(trd_dt, reg_centers[,1:3], by = c("src" = "region")) %>%
+  left_join(reg_centers[,1:3], by = c("dst" = "region")) %>%
   rename(xsrc = x.x, ysrc = y.x,
-         xdst = x.y, ydst = y.y)
-trd_map <- as_tibble(trd_map)
+         xdst = x.y, ydst = y.y) %>%
+  as_tibble()
 
 # a <- value
 trd_flows_map <-
-ggplot(data = ind) + 
+ggplot(data = gis_df) + 
     geom_polygon(aes(x = long, y = lat, group = group), fill = "wheat", 
                  colour = "white", alpha = 1, size = .5) + # aes fill = id, 
     coord_fixed(1) +
@@ -1092,11 +1094,11 @@ no initial stock."}
 # 1. Interpolation of parameters
 scen_RENBAL1 <- interpolate(add(mdl, STGBTR, DEM_ELC_DH), name = "RENBAL1", 
   description = "No inter-regional dispatch.")
-size(scen_RENBAL1)
+summary(scen_RENBAL1)
 
 # 2. Writing the model code and data in folder
 write_model(scen_RENBAL1, tmp.dir = "solwork/scen_RENBAL1", solver = GAMS)
-save(scen_RENBAL1, file = "tmp/scen_RENBAL1.RData")
+# save(scen_RENBAL1, file = "tmp/scen_RENBAL1.RData")
 
 # 3. Solving the model
 solve_model(tmp.dir = "solwork/scen_RENBAL1", wait = F)
@@ -1136,7 +1138,7 @@ scen_RENBAL2 <- interpolate(
 
 # 2. Writing the model code and data in folder
 write_model(scen_RENBAL2, tmp.dir = "solwork/scen_RENBAL2", solver = GAMS)
-save(scen_RENBAL2, file = "tmp/scen_RENBAL2.RData")
+# save(scen_RENBAL2, file = "tmp/scen_RENBAL2.RData")
 
 # 3. Solving the model
 solve_model(tmp.dir = "solwork/scen_RENBAL2", wait = F)
