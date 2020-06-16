@@ -14,7 +14,10 @@ editor_options:
 ---
 (WORK IN PROGRESS!)
 
-# Changes log   
+# Changelog   
+June 16, 2020   
+- Added option to scale-down the model to several states (with Southern Zonal Council as an example)   
+
 June 9, 2020  
 - works with R 4.0.1 version (requires *energyRt* v0.1.10+)  
 
@@ -43,24 +46,39 @@ tmz <- "Asia/Kolkata" # model timezone
 baseyear <- 2015 # model base year
 myear <- 2050 # model year
 
+model_regs <- NULL
+# Optional - select regions for the model
+if (T) { 
+  selected_regions <- c("Andhra Pradesh", "Karnataka", "Kerala", 
+                        # "Puducherry", 
+                        "Tamil Nadu", "Telangana")
+  (load("data/maps/india_adm1_light.RData"))
+  ii <- as.character(india_light_sp$NAME_1) %in% selected_regions 
+  plot(india_light_sp)
+  plot(india_light_sp[ii,], col = "red", add = TRUE)
+  model_regs <- as.character(india_light_sp$region[ii])
+}
+
+
 ```
 
 # GIS info, map
 ```{r}
 (load("data/maps/india_adm1_light.RData"))
-# gis_sp <- india_light_sp
-# gis_sf <- india_light_sf
-# gis_df <- india_light_df
-load("data/model_regs.RData")
+length(india_light_sp) # number of regions (polygons)
+
+if (is.null(model_regs)) {
+  (load("data/model_regs.RData"))
+}
 
 # (reg_names <- unique(as.character(gis_sp@data$region)))
 (reg_names <- unique(as.character(model_regs)))
 (reg_names_in_gis <- as.character(india_light_sp@data$region))
+gis_ii <- india_light_sp$region %in% model_regs
 
 (nreg <- length(reg_names))
 (nreg_in_gis <- length(india_light_sp@data$region))
 
-gis_ii <- india_light_sp$region %in% reg_names
 gis_sp <- india_light_sp[gis_ii,]
 gis_sf <- india_light_sf[gis_ii,]
 gis_df <- fortify(gis_sp, region = "region") %>% as_tibble()
@@ -80,7 +98,6 @@ reg_area <- tibble(
   region = reg_centers$region,
   area_km2 = raster::area(gis_sp) / 1e6
 )
-  
 
 ```
 
@@ -1102,7 +1119,6 @@ write_model(scen_RENBAL1, tmp.dir = "solwork/scen_RENBAL1", solver = GAMS)
 
 # 3. Solving the model
 solve_model(tmp.dir = "solwork/scen_RENBAL1", wait = F)
-# Alterntively, run GAMS directly in the model folder: 'gams energyRt'
 
 # 4. Read the solution (# after GAMS has finished)
 if (F) { 
@@ -1118,7 +1134,7 @@ if (F) {
 ```
 
 # Scenario 2: Exogenous UHV grid 100GW, endogenous converter stations 
-~ 5h to solve
+~ 1h to solve
 ```{r scen_RENBAL2, eval=T}
 # (optional) Scenario info:
 {scen_descr <- "
@@ -1142,8 +1158,7 @@ write_model(scen_RENBAL2, tmp.dir = "solwork/scen_RENBAL2", solver = GAMS)
 
 # 3. Solving the model
 solve_model(tmp.dir = "solwork/scen_RENBAL2", wait = F)
-# Alterntively, run GAMS directly in the model folder: 'gams mdl'
-
+#
 # 4. Read the solution
 if (F) {
   if (!exists("scen_RENBAL2")) load("tmp/scen_RENBAL2.RData")
@@ -1157,7 +1172,7 @@ if (F) {
 ```
 
 ## Scenario 2a: Exogenous UHV grid 100GW (no capacity variable), endogenous converter stations
-~ 8h to solve
+~ 1h to solve
 ```{r scen_RENBAL2a, eval=T}
 # (optional) Scenario info:
 {scen_descr <- "
@@ -1181,7 +1196,6 @@ save(scen_RENBAL2a, file = "tmp/scen_RENBAL2a.RData")
 
 # 3. Solving the model
 solve_model(tmp.dir = "solwork/scen_RENBAL2a", wait = F)
-# Alterntively, run GAMS directly in the model folder: 'gams mdl'
 
 # 4. Read the solution
 if (F) {
@@ -1220,7 +1234,6 @@ save(scen_RENBAL2b, file = "tmp/scen_RENBAL2b.RData")
 
 # 3. Solving the model
 solve_model(tmp.dir = "solwork/scen_RENBAL2b", wait = F)
-# Alterntively, run GAMS directly in the model folder: 'gams mdl'
 
 # 4. Read the solution
 if (F) {
@@ -1260,7 +1273,6 @@ save(scen_RENBAL2c, file = "tmp/scen_RENBAL2c.RData")
 
 # 3. Solving the model
 solve_model(tmp.dir = "solwork/scen_RENBAL2c", wait = F)
-# Alterntively, run GAMS directly in the model folder: 'gams mdl'
 
 # 4. Read the solution
 if (F) {
@@ -1639,11 +1651,11 @@ lev <- unique(vCap$process)
 vCap$process <- factor(vCap$process, levels = lev, ordered = T)
 
 # Technologies capacity
-ggplot(data = ind) + 
+ggplot(data = gis_df) + 
   geom_polygon(aes(x = long, y = lat, group = group), fill = "grey85", 
                    colour = "white", alpha = 1, size = .5) +
     geom_polygon(aes(x = long, y = lat, group = group, fill = value),
-                     data = right_join(ind, vCap, by = c("id" = "region")), #fill = "wheat", 
+                     data = right_join(gis_df, vCap, by = c("id" = "region")), #fill = "wheat", 
                  color = "white", alpha = 1, size = 0.25, inherit.aes = F) + # aes fill = id, 
   coord_fixed(1.0) +
   theme_void() +
@@ -1665,7 +1677,7 @@ ggplot(data = ind) +
 
 (vSTGBTR <- getData(scen, 
           name = c("vStorageInp", "vStorageOut", "vStorageStore"),
-          merge = T, stg = "STGBTR", slice_ = "d10[1-2]", region = "CT"))
+          merge = T, stg = "STGBTR", slice_ = "d10[1-2]", region = reg_names[1]))
 
 ggplot(vSTGBTR) + 
   geom_bar(aes(x = slice, y = value, fill = name), stat = "identity") +
@@ -1724,7 +1736,7 @@ trd_elc_y[is.na(trd_elc_y$GWh),]
 
 # trd_flows_map
 trd_flows_map2 <-
-ggplot(data = ind) + 
+ggplot(data = gis_df) + 
     geom_polygon(aes(x = long, y = lat, group = group), fill = "wheat", 
                  colour = "white", alpha = 1, size = .5) + # aes fill = id, 
     coord_fixed(1.0) +
@@ -1778,7 +1790,7 @@ vTradeCap <- vTradeCap %>%
 ii <- vTradeCap$GW >= 0 # filter grid capacity if needed
 
 trd_cap_map <-
-ggplot(data = ind) + 
+ggplot(data = gis_df) + 
   geom_polygon(aes(x = long, y = lat, group = group), fill = "wheat", 
                colour = "white", alpha = 1, size = .5) + # aes fill = id, 
   coord_fixed(1.) +
