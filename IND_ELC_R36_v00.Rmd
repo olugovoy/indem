@@ -51,6 +51,7 @@ model_regs <- NULL
 if (T) { 
   selected_regions <- c("Andhra Pradesh", "Karnataka", "Kerala", 
                         # "Puducherry", 
+                        # "West Bengal",
                         "Tamil Nadu", "Telangana")
   (load("data/maps/india_adm1_light.RData"))
   ii <- as.character(india_light_sp$NAME_1) %in% selected_regions 
@@ -194,6 +195,7 @@ DEM_ELC_DH <- newDemand(
   name = "DEM_ELC_DH",
   description = "Demand by regions, hours and year-days, full year",
   commodity = "ELC",
+  unit = "GWh",
   dem = data.frame(
     year = myear, 
     region = loadcurve$region,
@@ -228,6 +230,7 @@ DEM_ELCD <- newDemand(
 )
 
 sum(DEM_ELCD@dem$dem)
+DEM_ELCD@dem %>% as_tibble()
 
 
 ```
@@ -409,7 +412,7 @@ reg_area$sol_max_GW <- 80 * reg_area$area_km2 / 1e3 # 80 GW / 1000 km if 100$ co
 
 
 # Wind AF (onshore)
-load("data/wnd_af10.RData")
+(load("data/wnd_af10.RData"))
 ii <- wnd_af10$region %in% reg_names
 wnd_af10 <- wnd_af10[ii,]
 wnd_af10$slice <- datetime2tsdh(wnd_af10$datetime)
@@ -432,8 +435,8 @@ WINON10_AF <- newWeather("WINON10_AF",
 head(WINON10_AF@weather)
 dim(WINON10_AF@weather)[1] / 365 / 24 # Check - number of regions with the data
 
-reg_area$win_max_GW <- 3 * reg_area$area_km2 / 1e3 # 80 GW / 1000 km if 100$ coverage
-0.1 * sum(reg_area$win_max_GW) # up to 1% of territory
+reg_area$win_max_GW <- 3 * reg_area$area_km2 / 1e3 # 3 GW / 1000 km if 100$ coverage
+0.1 * sum(reg_area$win_max_GW) # up to 10% of territory
 
 # Wind AF (offshore)
 ii <- wndf_af10$region %in% reg_names
@@ -706,7 +709,7 @@ STGBTR1 <- newStorage(
 # STGP2P Daily - within 365 days ####
 # STGP2P1 <- newStorage(
 #   name = 'STGP2P',
-#   commodity = 'ELC',
+#   commodity = 'ELCD',
 #   description = "Power-to-power type of technology",
 #   cap2stg = 1, # if in PJ, convert("GWh", "PJ"),
 #   olife = list(
@@ -1133,6 +1136,42 @@ if (F) {
 
 ```
 
+## Solving with Python/Pyomo  
+Solving the same scenario using Python/Pyomo with CBC or CPLEX, for comparison.
+~ 15 min to generate 5-region model in Pyomo, <1 min to solve with CPLEX or CBC
+```{r scen_RENBAL1_py, eval=F}
+Pyomo <- list(
+  lang = "PYOMO",
+  export_format = "SQLite",
+  solver = "cplex"
+  # solver = "cbc"
+)
+# Workflow to solve the model (recommended for large models):
+# 1. Interpolation of parameters
+scen_RENBAL1 <- interpolate(add(mdl, STGBTR, DEM_ELC_DH), name = "RENBAL1", 
+  description = "No inter-regional dispatch.")
+summary(scen_RENBAL1)
+
+# 2. Writing the model code and data in folder
+write_model(scen_RENBAL1, tmp.dir = "solwork/scen_RENBAL1_py", solver = Pyomo)
+# save(scen_RENBAL1, file = "tmp/scen_RENBAL1.RData")
+
+# 3. Solving the model
+solve_model(tmp.dir = "solwork/scen_RENBAL1_py", wait = F)
+
+# 4. Read the solution (# after GAMS has finished)
+if (F) { 
+  if (!exists("scen_RENBAL1")) load("tmp/scen_RENBAL1.RData")
+  summary(scen_RENBAL1)
+  scen_RENBAL1py <- read_solution(scen_RENBAL1, dir.result = "solwork/scen_RENBAL1_py")
+  summary(scen_RENBAL1py)
+  
+  save(scen_RENBAL1, file = "scenarios/scen_RENBAL1_py.RData")
+  # load("scenarios/scen_RENBAL1.RData")
+}
+
+```
+
 # Scenario 2: Exogenous UHV grid 100GW, endogenous converter stations 
 ~ 1h to solve
 ```{r scen_RENBAL2, eval=T}
@@ -1287,7 +1326,7 @@ if (F) {
 ```
 
 # Scenario 3: Endogenous UHV grid and converter stations  
-~ 8h GAMS time
+~ 8h GAMS time (full model)
 ```{r scen_RENBAL3, eval=T}
 # (optional) Scenario info:
 {scen_descr <- "
@@ -1323,6 +1362,53 @@ if (F) {
 }
 
 ```
+
+## Solving with Python/Pyomo  
+Solving the same scenario using Python/Pyomo with CBC or CPLEX, for comparison.
+~ 30 min to generate 5-region model in Pyomo, ~ 7h CBC time or 10min CPLEX time
+```{r scen_RENBAL3_py, eval=T}
+Pyomo <- list(
+  lang = "PYOMO",
+  export_format = "SQLite",
+  solver = "cplex"
+  # solver = "cbc"
+)
+
+# (optional) Scenario info:
+{scen_descr <- "
+India power sector, balancing version,
+30 regions, 1 hour resolution,
+exogenous hourly demand,
+3 types of renewables, 
+1 types of storage,
+no initial stock,
+low ELC import price.
+endogenous, unlimited UHV grid,
+converter stations."}
+
+# 1. Interpolation of parameters
+scen_RENBAL3 <- interpolate(
+  add(mdl, STGBTR, UHV, TRBD_UHV_NEI, ELC2UHV, UHV2ELC, DEM_ELC_DH), 
+  name = "RENBAL3", description = scen_descr)
+# save(scen_RENBAL3, "tmp/scen_RENBAL3_py.RData")
+
+# 2. Writing the model code and data in folder
+write_model(scen_RENBAL3, tmp.dir = "solwork/scen_RENBAL3_py", solver = Pyomo)
+
+# 3. Solving the model
+solve_model(tmp.dir = "solwork/scen_RENBAL3_py", wait = F)
+
+# 4. Read the solution
+if (F) {
+  # if (!exists("scen_RENBAL3")) load("tmp/scen_RENBAL3.RData")
+  scen_RENBAL3_py <- read_solution(scen_RENBAL3, dir.result = "solwork/scen_RENBAL3_py")
+  summary(scen_RENBAL3_py)
+  save(scen_RENBAL3_py, file = "scenarios/scen_RENBAL3.RData")
+  # load("scenarios/scen_RENBAL3_py.RData")
+}
+
+```
+
 
 # Scenario 4: Constraints on investments in UHV grid  
 ```{r scen_RENBAL4, eval=FALSE}

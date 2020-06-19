@@ -67,12 +67,12 @@ GAMS <- list(
   inc3 = gams_options
 )
 
-PYOMO <- list(
-  lang = "PYOMO"
-  # files = list(
-  #   cplex.opt = cplex_options
-  # )
-)
+Pyomo <- list(
+  lang = "PYOMO",
+  export_format = "SQLite",
+  solver = "cplex"
+  # solver = "cbc"
+  )
 
 JuMP = list(
   lang = "JuMP"
