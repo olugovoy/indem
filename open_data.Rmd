@@ -1,0 +1,102 @@
+---
+title: "Data from open sources"
+author: '@revaluation'
+date: "6/23/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+
+```
+
+# Global Power Plant Database  
+
+**Source:**  <https://datasets.wri.org/dataset/globalpowerplantdatabase>  
+Global Energy Observatory, Google, KTH Royal Institute of Technology in Stockholm, Enipedia, World Resources Institute. 2018. Global Power Plant Database. Published on Resource Watch and Google Earth Engine; http://resourcewatch.org/ https://earthengine.google.com/  
+
+**License:**  
+Creative Commons Attribution 4.0 International License. Full license text available at (Creative Commons Attribution 4.0)[http://www.wri.org/publications/permissions-licensing]  
+
+**Metadata**  
+Project: Climate Data and Tools
+Page Last Updated: December 2, 2019
+
+```{r}
+dir_wri <- "data/WRI"
+if (!dir.exists(dir_wri)) dir.create(dir_wri, recursive = TRUE, showWarnings = FALSE)
+
+if (!file.exists(file.path(dir_wri, "india_power_plants.RData"))) {
+  www <- "https://wri-dataportal-prod.s3.amazonaws.com/c24/0ed/2e-1190-4d7e-b1da-c66b72e08858/globalpowerplantdatabasev120.zip"
+  (fl <- file.path(dir_wri, basename(www)))
+  
+  dw <- download.file(www, destfile = fl)
+  stopifnot(dw == 0) 
+  unzip(zipfile = fl, exdir = dir_wri)
+  unlink(fl)
+  
+  global_power_plant_database <- read.csv(file.path(dir_wri, "global_power_plant_database.csv")) %>%
+    as_tibble()
+  # save(global_power_plant_database, file = file.path(dir_wri, "global_power_plant_database.RData"))
+  india_power_plants <- global_power_plant_database %>%
+    filter(country == "IND")
+  rm(global_power_plant_database)
+  save(india_power_plants, file = file.path(dir_wri, "india_power_plants.RData"))
+  
+  pp <- select(india_power_plants, -country, - country_long)
+  unique(pp$primary_fuel)
+  
+  (load("data/maps/india_adm1_light.RData"))
+  plot(india_light_sp)
+  points(pp$longitude, pp$latitude, pch = 16, col = "red")
+
+  # Associating power plants with states
+  # ?sp::over
+  pp$region <- NA
+  for (i in 1:dim(pp)[1]) {
+    pp_sp <- SpatialPoints(cbind(pp$longitude[i], pp$latitude[i]), proj4string = india_light_sp@proj4string)
+    pp_reg <- over(pp_sp, india_light_sp)$region
+    if (length(pp_reg) != 1) warning("i = ", i, ", regions: ", pp_reg)
+    if (is.na(pp_reg)) {
+      pp_d <- rgeos::gDistance(pp_sp, india_light_sp, byid = T)
+      pp_reg <- india_light_sp$region[which.min(pp_d)]
+    }
+    
+    pp$region[i] <- pp_reg
+    pp_reg <- NULL
+  }
+  ii <- is.na(pp$region); summary(ii)
+  
+  if (sum(ii) > 0) {
+    pp[ii,]
+    
+    plot(india_light_sp, main = "Unidentified points")
+    points(pp$longitude[ii], pp$latitude[ii], pch = 16, col = "red")
+    
+    # ?gBuffer # 
+  }
+
+  save(pp, file = file.path(dir_wri, "india_power_plants.RData"))
+
+} else {
+  load(file.path(dir_wri, "india_power_plants.RData"))
+}
+
+ggplot(data = india_light_df) + 
+  geom_polygon(aes(x = long, y = lat, group = group), fill = "wheat", 
+               colour = "white", alpha = 1, size = .5) + # aes fill = id, 
+  coord_fixed(1.) +
+  # guides(fill=FALSE) + # do this to leave off the color legend
+  theme_void() + 
+  labs(title = "India's power plants (Global Power Plant Database, WRI, 2019)")  +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5)) +
+  geom_point(data = pp, 
+             aes(x = longitude, y = latitude, colour = primary_fuel, size = capacity_mw),
+             alpha = .7) +
+  guides(color = guide_legend(override.aes = list(size=5))) 
+  # scale_color_brewer(palette = "Set2")
+
+```
+

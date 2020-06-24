@@ -48,7 +48,7 @@ myear <- 2050 # model year
 
 model_regs <- NULL
 # Optional - select regions for the model
-if (T) { 
+if (F) { 
   selected_regions <- c("Andhra Pradesh", "Karnataka", "Kerala", 
                         # "Puducherry", 
                         # "West Bengal",
@@ -112,7 +112,8 @@ Therefore we have 8760 time slices, named according to the format *"dNNN_hNN"*, 
 
 For convenience, let's define finctions to convert data-time into slices names and back.  
 
-```{r Time_slices}
+## 365 days * 24 hours (8760)  
+```{r Time_slices_8760}
 # A list with two levels slices
 timeslices365 <- list(
   YDAY = paste0("d", formatC(1:365, width = 3, flag = "0")),
@@ -155,27 +156,102 @@ tail(slc365)
 
 ```
 
-## Commodities
+## 12 months * 24 hours (288)
+```{r Time_slices_m12h}
+
+timeslices_m12 <- list(
+  ANNUAL = "ANNUAL", # this name is fixed, should not be changes
+  MONTH = paste0("m", formatC(1:12, width = 2, flag = "0")),
+  HOUR = paste0("h", formatC(0:23, width = 2, flag = "0"))
+)
+
+# # Function to convert data-time object into names of time-slices.
+# datetime2tsdh <- function(dt) {
+#   paste0("d", formatC(yday(dt), width = 3, flag = "0"), "_",
+#          "h", formatC(hour(dt), width = 2, flag = "0"))
+# }
+# # check
+# datetime2tsdh(today(tmz))
+# 
+# # Function to coerse time-slices names into data-time format, for a given year and time-zone.
+# tsdh2datetime <- function(tslice, year = 2050, tz = tmz) {
+#   DAY <- as.integer(substr(tslice, 2, 4)) - 1
+#   HOUR <- as.integer(substr(tslice, 7, 8))
+#   lubridate::ymd_h(paste0(year, "-01-01 0"), tz = tz) + days(DAY) + hours(HOUR)
+# }
+# # check
+# tsdh2datetime("d365_h23")
+# 
+# # data.frame object with names of the final time-slices in the model
+# #   and releted data-time information
+slc_m12 <- tibble(
+  slice = kronecker(timeslices_m12$MONTH, 
+                    timeslices_m12$HOUR, FUN = "paste", sep = "_")
+)
+# # add date-time info
+slc_m12$smonth <- substr(slc_m12$slice, 1, 3)
+slc_m12$shour <- substr(slc_m12$slice, 5, 7)
+slc_m12$month <- as.integer(substr(slc_m12$slice, 2, 3))
+slc_m12$hour <- as.integer(substr(slc_m12$slice, 6, 7))
+head(slc_m12)
+tail(slc_m12)
+
+```
+
+
+# Commodities
 
 ```{r Commodities}
 ELC <- newCommodity('ELC', slice = "HOUR")
-SOL <- newCommodity('SOL', slice = "HOUR")
-WIN <- newCommodity('WIN', slice = "HOUR")
-WFF <- newCommodity('WFF', slice = "HOUR")
+CO2 <- newCommodity('CO2', slice = "HOUR")
+SOL <- newCommodity('SOL', slice = "ANNUAL")
+WIN <- newCommodity('WIN', slice = "ANNUAL")
+WFF <- newCommodity('WFF', slice = "ANNUAL")
 
 UHV <- newCommodity(
   name = 'UHV', 
   description = "Ultra High Voltage electricity",
   slice = "HOUR")
 
+COA <- newCommodity(
+  name = 'COA', 
+  description = "All coals",
+  emis = list( # 
+    comm = "CO2", # 
+    unit = "kt/GWh", # 
+    mean = convert("kt/PJ", "kt/GWh", 100) # 
+    ),
+  slice = "ANNUAL")
+
+GAS <- newCommodity(
+  name = 'GAS', 
+  description = "Natural gas",
+  slice = "ANNUAL")
+
+BIO <- newCommodity(
+  name = 'BIO', 
+  description = "Biomass",
+  slice = "ANNUAL")
+
+HYD <- newCommodity(
+  name = 'HYD', 
+  description = "Hydro energy",
+  slice = "ANNUAL")
+
+NUC <- newCommodity(
+  name = 'NUC', 
+  description = "Nuclear energy",
+  slice = "ANNUAL")
+
 
 ```
 
-## Demand  
+# Demand   
 
+## Full year, 8760 hours
 Hourly demand by regions - no loadcurve data yet  
 
-```{r ELC_demand}
+```{r ELC_demand_8760}
 (load("data/dmd.RData"))
 dmd <- dmd[dmd$region %in% reg_names,]
 dmd$hour_GWh <- dmd$consum_GWh / 365 / 24 # evenly distributed
@@ -212,6 +288,10 @@ summary(DEM_ELC_DH@dem$dem)
 # Annual base-year demand
 elc_dem_BY_GWh <- sum(DEM_ELC_DH@dem$dem)
 
+```
+
+## By days, 365 days
+```{r}
 loadcurve_YDAY <- loadcurve %>% 
   mutate(YDAY = substr(slice, 1, 4)) %>%
   group_by(region, YDAY) %>%
@@ -232,8 +312,37 @@ DEM_ELCD <- newDemand(
 sum(DEM_ELCD@dem$dem)
 DEM_ELCD@dem %>% as_tibble()
 
+```
+
+## By months and hours  
+```{r}
+loadcurve_m12h24 <- loadcurve %>% 
+  mutate(MONTH = paste0("m",
+           formatC(as.integer(month(datetime)), 
+                   digits = 0, width = 2, flag = "0")),
+         HOUR = substr(slice, 6, 8),
+         slice = paste0(MONTH, "_", HOUR)
+         ) %>%
+  group_by(region, slice, MONTH, HOUR) %>%
+  summarise(GWh = sum(GWh))
+
+DEM_ELC_MH <- newDemand(
+  name = "DEM_ELC",
+  description = "Demand by regions, month-hours",
+  commodity = "ELC",
+  dem = data.frame(
+    year = 2018, 
+    region = loadcurve_m12h24$region,
+    slice = loadcurve_m12h24$slice, 
+    dem = round(loadcurve_m12h24$GWh, 7)
+    )
+)
+
+sum(DEM_ELC_MH@dem$dem)
+DEM_ELC_MH@dem %>% as_tibble()
 
 ```
+
 
 ## Alternative "flat" demand
 (by now is equal to the *DEM_ELC_DH* since there is no load-curve data)
@@ -309,7 +418,7 @@ CELC2DEM35CAPFX <- newConstraintS(
 
 ```
 
-# Optimized location of consumption
+## Optimized location of consumption
 ```{r}
 DEM100 <- newCommodity("DEM100", slice = "HOUR")
 
@@ -421,7 +530,7 @@ dim(wnd_af10)[1] / 365/24 # number of regions with the onshore potential
 ii <- rep(T, dim(wnd_af10)[1]) # 
 summary(wnd_af10$af50m)
 # wnd_af20$region <- as.character(wnd_af20$region)
-WINON10_AF <- newWeather("WINON10_AF",
+WIN10_AF <- newWeather("WIN10_AF",
                         description = "Onshore wind potential af20",
                         region = unique(wnd_af10$region[ii]),
                         # unit = "kWh/kWh_max",
@@ -432,11 +541,15 @@ WINON10_AF <- newWeather("WINON10_AF",
                           slice = wnd_af10$slice[ii],
                           wval = wnd_af10$af50m[ii]
                         ))
-head(WINON10_AF@weather)
-dim(WINON10_AF@weather)[1] / 365 / 24 # Check - number of regions with the data
+head(WIN10_AF@weather)
+dim(WIN10_AF@weather)[1] / 365 / 24 # Check - number of regions with the data
 
-reg_area$win_max_GW <- 3 * reg_area$area_km2 / 1e3 # 3 GW / 1000 km if 100$ coverage
-0.1 * sum(reg_area$win_max_GW) # up to 10% of territory
+win_max_GW <- group_by(wnd_af10, region) %>%
+  summarise(max_GW = max(max_GWh))
+
+# reg_area$win_max_GW <- 3 * reg_area$area_km2 / 1e3 # 3 GW / 1000 km if 100$ coverage
+# 0.1 * sum(reg_area$win_max_GW) # up to 10% of territory
+
 
 # Wind AF (offshore)
 ii <- wndf_af10$region %in% reg_names
@@ -447,7 +560,7 @@ dim(wndf_af10)[1] / 365/24
 ii <- rep(T, dim(wndf_af10)[1]) # 
 summary(wndf_af10$af50m)
 wndf_af10$region <- as.character(wndf_af10$region)
-WINOF10_AF <- newWeather("WINOF10_AF",
+WIF10_AF <- newWeather("WIF10_AF",
                         description = "Offshore wind potential af20",
                         # unit = "kWh/kWh_max",
                         region = unique(wndf_af10$region),
@@ -458,8 +571,12 @@ WINOF10_AF <- newWeather("WINOF10_AF",
                           slice = wndf_af10$slice[ii],
                           wval = wndf_af10$af50m[ii]
                         ))
-head(WINOF10_AF@weather)
-dim(WINOF10_AF@weather)[1] / 365 / 24
+head(WIF10_AF@weather)
+dim(WIF10_AF@weather)[1] / 365 / 24
+
+wif_max_GW <- group_by(wndf_af10, region) %>%
+  summarise(max_GW = max(max_GWh))
+
 
 ```
 
@@ -500,13 +617,13 @@ RES_WIN <- newSupply(
   #   weather = c("SOLAR_AF"),
   #   wava.up =  c(1)
   #   ),
-  availability = list(
-    region = wnd_af10$region,
-    slice = wnd_af10$slice,
-# here is an alternative (equivalent) way to use weather factors in supply
-    ava.up = wnd_af10$max_GWh # Max available resource in hour
-  ),
-  slice = "HOUR"
+#   availability = list(
+#     region = wnd_af10$region,
+#     slice = wnd_af10$slice,
+# # here is an alternative (equivalent) way to use weather factors in supply
+#     ava.up = wnd_af10$max_GWh # Max available resource in hour
+#   ),
+  slice = "ANNUAL"
 )
 
 RES_WFF <- newSupply(
@@ -519,17 +636,473 @@ RES_WFF <- newSupply(
   #   weather = c("SOLAR_AF"),
   #   wava.up =  c(1)
   #   ),
-  availability = list(
-    region = wndf_af10$region,
-    slice = wndf_af10$slice,
-    ava.up = wndf_af10$max_GWh # Max available resource in hour
-  ),
-  slice = "HOUR"
+  # availability = list(
+  #   region = wndf_af10$region,
+  #   slice = wndf_af10$slice,
+  #   ava.up = wndf_af10$max_GWh # Max available resource in hour
+  # ),
+  slice = "ANNUAL"
 )
+
+RES_HYD <- newSupply(
+  name = "RES_HYD",
+  description = "Simplified hydro-resource",
+  commodity = "HYD",
+  slice = "ANNUAL"
+)
+
+SUPNUC <- newSupply(
+  name = "SUPNUC",
+  commodity = "NUC",
+  unit = "GWh",
+  availability = list(
+    # ava.up = convert("GWh", "PJ", 20*24*365),
+    # http://www.world-nuclear.org/information-library/economic-aspects/economics-of-nuclear-power.aspx
+    cost = convert("USD/kWh", "MUSD/GWh", .39/100)
+  ),
+  slice = "ANNUAL"
+)
+
+SUPCOA <- newSupply(
+  name = "SUPCOA",
+  commodity = "COA",
+  description = "Simplified coal supply",
+  availability = list(
+    cost = convert("USD/tce", "MUSD/GWh", 70/.7)
+  ),
+  slice = "ANNUAL"
+)
+
+# 1,000 Cubic Feet Of Natural Gas to Therms (u.s.) = 10.0024
+# 4 USD/cu.ft ~= 0.4 USD/therm
+SUPGAS <- newSupply(
+  name = "SUPGAS",
+  description = "Simplified gas supply",
+  commodity = "GAS",
+  availability = list(
+    cost = convert("USD/therm", "MUSD/GWh", 0.5)
+  ),
+  slice = "ANNUAL"
+)
+
+SUPOIL <- newSupply(
+  name = "SUPOIL",
+  description = "Simplified oil supply",
+  commodity = "OIL",
+  availability = list(
+    cost = convert("USD/therm", "MUSD/GWh", 0.5)
+  ),
+  slice = "ANNUAL"
+)
+
+SUPBIO <- newSupply(
+  name = "SUPBIO",
+  description = "Simplified Biomass supply",
+  commodity = "BIO",
+  availability = list(
+    cost = convert("USD/therm", "MUSD/GWh", 0.4) # assumption
+  ),
+  slice = "ANNUAL"
+)
+
 
 ```
 
 # Power generating technologies  
+
+## Current stock
+```{r}
+(load("data/WRI/india_power_plants.RData"))
+
+ggplot(data = gis_df) + 
+  geom_polygon(aes(x = long, y = lat, group = group), fill = "wheat", 
+               colour = "white", alpha = 1, size = .5) + # aes fill = id, 
+  coord_fixed(1.) +
+  # guides(fill=FALSE) + # do this to leave off the color legend
+  theme_void() + 
+  labs(title = "India's power plants (Global Power Plant Database, WRI, 2019)")  +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5)) +
+  geom_point(data = pp, 
+             aes(x = longitude, y = latitude, colour = primary_fuel, size = capacity_mw),
+             alpha = .7) +
+  guides(color = guide_legend(override.aes = list(size=5))) 
+
+unique(pp$primary_fuel)
+unique(pp$other_fuel1)
+unique(pp$other_fuel2)
+unique(pp$other_fuel3)
+head(pp) %>% as.data.frame()
+
+# Nation-wide capacity structure
+pp %>% group_by(primary_fuel) %>%
+  summarize(GW = sum(capacity_mw) / 1e3)
+
+# aggregating by fuel types
+ppa <- pp %>% 
+  group_by(region, primary_fuel, other_fuel1, other_fuel2) %>%
+  summarise(start_year = weighted.mean(commissioning_year, 
+                                       w = capacity_mw,
+                                       na.rm = T),
+            cap_year = weighted.mean(year_of_capacity_data,
+                                     w = capacity_mw,
+                                     na.rm = T),
+            cap_GW = sum(capacity_mw) / 1e3,
+            gen_GWh = max(generation_gwh_2013,
+                          generation_gwh_2014,
+                          generation_gwh_2015,
+                          generation_gwh_2016,
+                          generation_gwh_2017, 
+                          estimated_generation_gwh,
+                          na.rm = T)) %>%
+  mutate(af = gen_GWh / cap_GW / 365 / 24)
+print(ppa, n = 1e3)
+
+# There is one cogeneration (CHP) power plant, quite small
+# We can aggregate it with all other plants or model separately
+ii <- grepl("Cogen", ppa$other_fuel1, ); summary(ii)
+ppa[ii,]
+
+# CHP can be modeled this way:
+ECHP <- newTechnology(
+  name = "ECHP",
+  description = "Cogeneration (CHP) coal-fired power plant",
+  # region = ppa$region[ii],
+  input = data.frame(
+    comm = c("COA", "OIL"),
+    unit = "GWh",
+    group = "i"
+  ),
+  output = data.frame(
+    comm = c("ELC", "HEAT"),
+    unit = "GWh",
+    group = "o"
+  ), 
+  geff = data.frame(
+    group = "i",
+    ginp2use = 1
+  ),
+  ceff = data.frame(
+    comm = c("COA", "OIL", "ELC", "HEAT"),
+    # cinp2use = c(.3, .4, NA, NA),
+    use2cact = c(NA, NA, 0.3, 0.3),
+    cact2cout = c(NA, NA, 1, 3),
+    share.up = c(NA, NA, .5, NA),
+    share.fx = c(NA, 0.03, NA, NA)
+  )
+)
+draw(ECHP)
+
+# ..., but for now, since the capacity of the plant is too small,
+# and we don't model demand for heat,
+# and we don't have all CHP parameters
+# let's just aggregate it with other coal plants.
+# Also, many coal plants are using Oil as a start-up fuel,
+# for simplicity we can drop the second fuel and use only first one.
+# And for simplicity, we can aggregate Gas and Oil power plants
+# Therefore, we need to reaggregate:
+
+ppb <- pp %>%
+  mutate(primary_fuel = plyr::revalue(primary_fuel, c("Oil" = "Gas"))) %>%
+  group_by(region, primary_fuel) %>%
+  summarise(start_year = weighted.mean(commissioning_year, 
+                                       w = capacity_mw,
+                                       na.rm = T),
+            cap_year = weighted.mean(year_of_capacity_data,
+                                     w = capacity_mw,
+                                     na.rm = T),
+            cap_GW = sum(capacity_mw) / 1e3,
+            gen_GWh = max(generation_gwh_2013,
+                          generation_gwh_2014,
+                          generation_gwh_2015,
+                          generation_gwh_2016,
+                          generation_gwh_2017, 
+                          estimated_generation_gwh,
+                          na.rm = T)) %>%
+  mutate(af = gen_GWh / cap_GW / 365 / 24)
+print(ppb, n = 1e3)
+
+# EHYD -- Hydro plants####
+{ii <- grepl("hydro", ppb$primary_fuel, ignore.case = T); summary(ii)
+ppb[ii,]
+
+EHYD_BY <- newTechnology( 
+  name = "EHYD_BY",
+  description = "Hydro power plants, base year",
+  region = ppb$region[ii],
+  input = list(
+    comm = "HYD",
+    unit = "GWh",
+    combustion = 0
+  ),
+  output = list(
+    comm = "ELC",
+    unit = "GWh"
+  ),
+  cap2act = 24*365,
+  ceff = list(
+    comm = c("HYD"),
+    cinp2use = c(1)
+  ),
+  af = list(
+    region = ppb$region[ii],
+    # slice = ,
+    af.fx = ppb$af[ii]
+  ),
+  # fixom = list(
+  #   fixom = 
+  # ),
+  # varom = list(
+  #   varom = 
+  # ),
+  # invcost = list(
+  #   # year = 2010,
+  #   invcost = 
+  # ),
+  stock = data.frame(
+    region = c(ppb$region[ii], ppb$region[ii]),
+    year = c(rep(2018, sum(ii)), rep(2060, sum(ii))),
+    stock = c(ppb$cap_GW[ii], ppb$cap_GW[ii])
+  ),
+  # start = list(
+  #   start = 2060
+  # ),
+  end = list(
+    end = 2010
+  ),
+  # olife = list(
+  #   olife = 80
+  # ),
+  slice = 'HOUR'
+)
+
+draw(EHYD_BY)
+}
+
+# ENUC -- Nuclear plants####
+{ii <- grepl("nuclear", ppb$primary_fuel, ignore.case = T); summary(ii)
+ppb[ii,]
+
+ENUC_BY <- newTechnology( 
+  name = "ENUC_BY",
+  description = "Nuclear power plants, base year",
+  region = ppb$region[ii],
+  input = list(
+    comm = "NUC",
+    unit = "GWh",
+    combustion = 0
+  ),
+  output = list(
+    comm = "ELC",
+    unit = "GWh"
+  ),
+  cap2act = 24*365,
+  ceff = list(
+    comm = c("NUC"),
+    cinp2use = c(1)
+  ),
+  af = data.frame(
+    region = ppb$region[ii],
+    # slice = ,
+    af.fx = 0.9 #ppb$af[ii]
+  ),
+  # fixom = list(
+  #   fixom = 
+  # ),
+  varom = list(
+    varom = 0.7 # assumed costs of production
+  ),
+  # invcost = list(
+  #   # year = 2010,
+  #   invcost = 
+  # ),
+  stock = data.frame(
+    region = c(ppb$region[ii], ppb$region[ii]),
+    year = c(rep(2018, sum(ii)), rep(2060, sum(ii))),
+    stock = c(ppb$cap_GW[ii], ppb$cap_GW[ii])
+  ),
+  # start = list(
+  #   start = 2060
+  # ),
+  end = list(
+    end = 2010
+  ),
+  # olife = list(
+  #   olife = 80
+  # ),
+  slice = 'HOUR'
+)
+
+draw(ENUC_BY)
+}
+
+# EBIO - Biomass power plants ####
+{
+ii <- grepl("bio", ppb$primary_fuel, ignore.case = T); summary(ii)
+ppb[ii,] # !!! errors in data (check af)
+
+EBIO_BY <- newTechnology( 
+  name = "EBIO_BY",
+  description = "Generic Biomass-fired power plant, base year",
+  region = ppb$region[ii],
+  input = list(
+    comm = "BIO",
+    unit = "GWh",
+    combustion = 1
+  ),
+  output = list(
+    comm = "ELC",
+    unit = "GWh"
+  ),
+  cap2act = 24*365,
+  ceff = list(
+    comm = c("BIO"),
+    cinp2use = c(.35)
+  ),
+  afs = list(
+    slice = "ANNUAL",
+    afs.up = .6 # assumption
+  ),
+  # fixom = list(
+  #   fixom = 
+  # ),
+  # varom = list(
+  #   varom = 0.01 # USD/kWh - assumption
+  # ),
+  invcost = list(
+    invcost = 3000
+  ),
+  stock = data.frame(
+    region = c(ppb$region[ii], ppb$region[ii]),
+    year = c(rep(2018, sum(ii)), rep(2040, sum(ii))),
+    stock = c(ppb$cap_GW[ii], .8*ppb$cap_GW[ii]) # assumption
+  ),
+  end = list(
+    end = 2010
+  ),
+  # olife = list(
+  #   olife = 30
+  # ),
+  slice = 'HOUR'
+)
+draw(EBIO_BY)  
+  
+}
+
+
+# ECOA - Coal power plants ####
+{
+ii <- grepl("coal", ppb$primary_fuel, ignore.case = T); summary(ii)
+ppb[ii,] # !!! errors in data (check af)
+
+ECOA_BY <- newTechnology( 
+  name = "ECOA_BY",
+  description = "Generic Coal-fired power plant, base year",
+  region = ppb$region[ii],
+  input = list(
+    comm = "COA",
+    unit = "GWh",
+    combustion = 1
+  ),
+  output = list(
+    comm = "ELC",
+    unit = "GWh"
+  ),
+  cap2act = 24*365,
+  ceff = list(
+    comm = c("COA"),
+    cinp2use = c(.35)
+  ),
+  afs = list(
+    slice = "ANNUAL",
+    afs.up = .6 # assumption
+  ),
+  # fixom = list(
+  #   fixom = 
+  # ),
+  # varom = list(
+  #   varom = 0.01 # USD/kWh - assumption
+  #   # convert("USD/kWh", "MUSD/GWh", 1)
+  # ),
+  # invcost = list(
+  #   invcost = 
+  # ),
+  stock = data.frame(
+    region = c(ppb$region[ii], ppb$region[ii]),
+    year = c(rep(2018, sum(ii)), rep(2040, sum(ii))),
+    stock = c(ppb$cap_GW[ii], .7*ppb$cap_GW[ii]) # assumption
+  ),
+  end = list(
+    end = 2010
+  ),
+  # olife = list(
+  #   olife = 30
+  # ),
+  slice = 'HOUR'
+)
+draw(ECOA_BY)  
+  
+}
+
+# EGAS - GAS & oil power plants ####
+{
+# aggregating Gas & Oil power plants
+ii <- grepl("gas", ppb$primary_fuel, ignore.case = T); summary(ii)
+ppb[ii,] # !!! errors in data (check af)
+EGAS_BY <- newTechnology( 
+  name = "EGAS_BY",
+  description = "Generic Gas-fired power plant, base year",
+  region = ppb$region[ii],
+  input = list(
+    comm = "GAS",
+    unit = "GWh",
+    combustion = 1
+  ),
+  output = list(
+    comm = "ELC",
+    unit = "GWh"
+  ),
+  cap2act = 24*365,
+  ceff = list(
+    comm = c("GAS"),
+    cinp2use = c(.45)
+  ),
+  afs = list(
+    slice = "ANNUAL",
+    afs.up = .4 # assumption
+  ),
+  # fixom = list(
+  #   fixom = 
+  # ),
+  # varom = list(
+  #   varom = 0.01 # USD/kWh - assumption
+  #   # convert("USD/kWh", "MUSD/GWh", 1)
+  # ),
+  # invcost = list(
+  #   invcost = 
+  # ),
+  stock = data.frame(
+    region = c(ppb$region[ii], ppb$region[ii]),
+    year = c(rep(2018, sum(ii)), rep(2040, sum(ii))),
+    stock = c(ppb$cap_GW[ii], .7*ppb$cap_GW[ii]) # assumption
+  ),
+  end = list(
+    end = 2010
+  ),
+  # olife = list(
+  #   olife = 30
+  # ),
+  slice = 'HOUR'
+)
+draw(EGAS_BY)  
+
+}
+
+
+```
+
+
+## New technologies
 
 ```{r Technologies}
 
@@ -590,7 +1163,7 @@ CSOL_UP <- newConstraintS(
 EWIN <- newTechnology(
   name = "EWIN",
   description = "Onshore wind farm",
-   WINON10_AF@region, # Limiting to regions with available resource
+   WIN10_AF@region, # Limiting to regions with available resource
   input = list(
     comm = "WIN",
     unit = "GWh"
@@ -604,7 +1177,7 @@ EWIN <- newTechnology(
     af.fx = 1 # forcing output when resource is available
   ),
   weather = list(
-    weather = c("WINON10_AF"),
+    weather = c("WIN10_AF"),
     waf.fx = c(1)
     # waf.up = c(1) # 
   ),
@@ -625,10 +1198,26 @@ EWIN <- newTechnology(
 )
 draw(EWIN)
 
+CWIN_UP <- newConstraintS(
+  name = "CWIN_UP",
+  eq = "<=",
+  type = "capacity",
+  for.each = data.frame(
+    year = 2050L,
+    tech = "EWIN",
+    region = win_max_GW$region),
+  rhs = data.frame(
+    year = 2050L,
+    tech = "EWIN",
+    region = win_max_GW$region,
+    rhs = 0.1 * round(win_max_GW$max_GW, 0) # up to 10% of territory per region
+  )
+)
+
 EWFF <- newTechnology(
   name = "EWFF",
   description = "Offshore wind farm",
-  region = WINOF10_AF@region, # Limiting to regions with available resource
+  region = WIF10_AF@region, # Limiting to regions with available resource
   input = list(
     comm = "WFF",
     unit = "GWh"
@@ -642,7 +1231,7 @@ EWFF <- newTechnology(
     af.fx = 1 # forcing output when resource is available
   ),
   weather = list(
-    weather = c("WINOF10_AF"),
+    weather = c("WIF10_AF"),
     waf.up = c(1) # 
   ),
   # fixom = list(
@@ -662,6 +1251,22 @@ EWFF <- newTechnology(
   )
 )
 draw(EWFF)
+
+CWIF_UP <- newConstraintS(
+  name = "CWIF_UP",
+  eq = "<=",
+  type = "capacity",
+  for.each = data.frame(
+    year = 2050L,
+    tech = "EWIF",
+    region = wif_max_GW$region),
+  rhs = data.frame(
+    year = 2050L,
+    tech = "EWIF",
+    region = wif_max_GW$region,
+    rhs = 0.1 * round(wif_max_GW$max_GW, 0) # up to 10% of territory per region
+  )
+)
 
 ```
 
@@ -1030,7 +1635,8 @@ EIMP10@imp$price <- 10
 ```
 
 
-# The Model  
+# The Model 
+## Balancing version, 8760 hours, 1 year
 The base model and scenario:  
 - generic electricity (ELC);  
 - three types of renewables; 
@@ -1045,10 +1651,10 @@ reps <- add(newRepository('main_repository'),
   # Resources (supply)
   RES_SOL, RES_WIN, RES_WFF,
   # Weather factors
-  SOLAR_AF, WINOF10_AF, WINON10_AF,
+  SOLAR_AF, WIF10_AF, WIN10_AF,
   # Generating technologies
   ESOL, EWIN, EWFF,
-  CSOL_UP,
+  CSOL_UP, CWIN_UP, CWIF_UP,
   # Storage
   # STGBTR, 
   #STGP2P1,
@@ -1059,7 +1665,7 @@ reps <- add(newRepository('main_repository'),
   # ELC2UHV, UHV2ELC,
   # Export/Import,
   # EEXP, 
-  EIMP1 # low relaiability (low marginal cost, high demand curtailments)
+  EIMP1 # low reliability (low marginal cost, high demand curtailments)
   # ELC demand with load curve (24 hours x 365 days)
   # DEM_ELC_DH # static
 )
@@ -1105,6 +1711,99 @@ no initial stock."}
 # mdl2 <- mdl
 # mdl2@data$main_repository@data$EIMP <- EIMPLO
 
+```
+
+## Transitional model, 12 months, 24 hours, 2018-2050  
+(testing Base-Year only)
+```{r Model_BASEYEAR, eval=FALSE}
+# Repository with all the data-objects
+repo_BY <- add(newRepository('base_year_repository'), 
+  # Commodities
+  ELC, SOL, WIN, WFF, #UHV,
+  COA, GAS, BIO, HYD, NUC, CO2,
+  # Resources (supply)
+  RES_SOL, RES_WIN, RES_WFF, RES_HYD,
+  SUPCOA, SUPGAS, SUPBIO, SUPNUC,
+  # Weather factors
+  # SOLAR_AF, WIF10_AF, WIN10_AF,
+  # BY generating technologies
+  ECOA_BY, EGAS_BY, EBIO_BY, EHYD_BY, ENUC_BY,
+  # New technologies
+  # ESOL, EWIN, EWFF,
+  # CSOL_UP, CWIN_UP, CWIF_UP,
+  # Storage
+  # STGBTR, 
+  #STGP2P1,
+  # Simplified interregional ELC trade
+  # TRD_ELC_ALL,
+  # UHV grid
+  # TRBD_UHV_NEI,
+  # ELC2UHV, UHV2ELC,
+  # Export/Import,
+  # EEXP, 
+  EIMP1 # reliability level
+  # ELC demand with load curve (24 hours x 365 days)
+  # DEM_ELC_DH # static
+)
+length(repo_BY@data)
+names(repo_BY@data)
+
+# model-class object 
+mdl_BY <- newModel(
+  name = 'INDEM_BY', 
+  description = "Transitional model",
+  ## in case of infeasibility, `dummy` variables can be added
+  # debug = data.frame(#comm = "ELC",
+  #                    dummyImport = 1e6,
+  #                    dummyExport = 1e6),
+  region = reg_names,
+  discount = 0.05,
+  slice = list(ANNUAL = "ANNUAL",
+               # MONTH = timeslices$MONTH, 
+               # HOUR = timeslices$HOUR
+               MONTH = timeslices_m12$MONTH, 
+               HOUR = timeslices_m12$HOUR
+               ),
+  repository = repo_BY,
+  # GIS = gis_sp,
+  early.retirement = F)
+
+# Check the model time-slices
+head(mdl_BY@sysInfo@slice@levels)
+sum(mdl_BY@sysInfo@slice@levels$share)
+
+# Set milestone-years
+# mdl <- setMilestoneYears(mdl, start = 2015, interval = c(1, 2, 5, 6, 7, rep(10, 3)))
+mdl_BY <- setMilestoneYears(mdl_BY, start = 2018, interval = c(1, 3, 4, 5))
+mdl_BY@sysInfo@milestone # check
+
+# (optional) the model info
+{mdl_BY@description <- "
+India power sector, renewables balancing version,
+30 regions, 12 months x 24 hours,
+Base year technologies,
+3 types of renewables, 
+1 types of storages,
+no initial stock."}
+
+# test scenario
+scen_INDEMBY <- interpolate(add(mdl_BY, STGBTR, DEM_ELC_MH), name = "INDEM_BY", 
+  description = "No inter-regional dispatch.")
+summary(scen_INDEMBY)
+
+# 2. Writing the model code and data in folder
+write_model(scen_INDEMBY, tmp.dir = "solwork/scen_INDEMBY", solver = GAMS)
+# save(scen_RENBAL1, file = "tmp/scen_RENBAL1.RData")
+
+# 3. Solving the model
+solve_model(tmp.dir = "solwork/scen_INDEMBY", wait = F)
+
+# 4. Read the solution (# after GAMS has finished)
+if (F) { 
+  scen_INDEMBY <- read_solution(scen_INDEMBY, dir.result = "solwork/scen_INDEMBY")
+  summary(scen_INDEMBY)
+
+}
 ```
 
 # Scenario 1: No interregional trade  
@@ -1537,6 +2236,7 @@ if (!exists("scen_RENBAL3")) load("scenarios/scen_RENBAL3.RData")
 # if (!exists("scen_RENBAL4")) load("scenarios/scen_RENBAL4.RData")
 # if (!exists("scen_RENBAL5")) load("scenarios/scen_RENBAL5.RData")
 # scen <- scen_RENBAL1
+scen <- scen_INDEMBY
 scen <- scen_RENBAL2
 scen <- scen_RENBAL3
 # scen <- scen_RENBAL4
@@ -1548,9 +2248,9 @@ summary(scen)
 # sum(pDemand_ELC$value)/1e3
 
 # Price credit
-(vExp_Credit_ELC <- getData(scen, name = "vTradeCost", merge = T))
-
-(vObj <- vObjective$value - sum(vExp_Credit_ELC$value))
+# (vExp_Credit_ELC <- getData(scen, name = "vTradeCost", merge = T))
+# 
+# (vObj <- vObjective$value - sum(vExp_Credit_ELC$value))
 
 # Total electricity output from generating technologies
 (vTechOut_ELC <- getData(scen, name = "vTechOut", comm = "ELC", tech_ = "^E", 
@@ -1560,36 +2260,42 @@ vTechOut_ELC %>%
   group_by(tech) %>% summarise(TWh = sum(value)/1e3)
 
 # Total demand
-(vExportRow_ELC <- getData(scen, name = "vExport", comm = "DEMY", merge = T))
-sum(vExportRow_ELC$value)
+# (vExportRow_ELC <- getData(scen, name = "vExport", comm = "DEMY", merge = T))
+# sum(vExportRow_ELC$value)
 
 (pDemand_ELC <- getData(scen, name = "pDemand", comm = "ELC", merge = T))
 sum(pDemand_ELC$value)
 
-(dem_tot <- sum(vExportRow_ELC$value) + sum(pDemand_ELC$value))
+(dem_tot <- sum(pDemand_ELC$value))
 
 # Total ELC Output vs Demand
-sum(vTechOut_ELC$value) / dem_tot
+# sum(vTechOut_ELC$value) / dem_tot
 
 # System costs USD/kWh (== MUSD/GWh)
 ## for electricity consumed
-vObj / dem_tot
+# vObj / dem_tot
 # vObjective$value / sum(pDemand_ELC$value) / 3
 ## for electricity produced
-vObj / sum(vTechOut_ELC$value)
+# vObj / sum(vTechOut_ELC$value)
 
 # Supply curtailments
 (vExportROW_ELC <- getData(scen, name = "vExportRow", merge = T)) # if EEXP used
-sum(vExportROW_ELC$value)/dem_tot
+# sum(vExportROW_ELC$value)/dem_tot
 
 (vBalance_ELC <- getData(scen, name = "vBalance", comm = c("ELC", "UHV"), merge = T)) 
 sum(vBalance_ELC$value)/dem_tot * 100 # % of demand
+
+(vBalance_CO2 <- getData(scen, name = "vBalance", comm = c("CO2"), merge = T)) %>%
+  group_by(year, comm) %>%
+  summarise(kt = sum(value))
 
 # Demand curtailments
 (vImportROW_ELC <- getData(scen, name = "vImportRow", merge = T)) 
 sum(vImportROW_ELC$value)/dem_tot * 100 # %
 
 # Generating and storage capacity 
+getData(scen, name = c("vTechCap", "vStorageCap"), merge = T)
+
 (vTechStgCap <- getData(scen, name = c("vTechCap", "vStorageCap"), merge = T, process = T))
 vTechStgCap %>%
   group_by(scenario, process, year) %>%
@@ -1626,6 +2332,7 @@ sum(vStorageCap_STGBTR$value)/dem_tot * 100
                          merge = T, newNames = c("value" = "GWh")))
 summary(vTechOut_ELC$GWh)
 unique(vTechOut_ELC$tech)
+unique(vTechOut_ELC$year)
 
 supy <- vTechOut_ELC %>%
   mutate(hour = as.integer(substr(slice, 7,8))) %>%
